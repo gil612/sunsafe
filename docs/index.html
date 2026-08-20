@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SunSafe — מד חשיפה לשמש חכם</title>
+<meta name="description" content="SunSafe עוקב אחרי רמת קרינת UV בזמן אמת, ומתריע בטלגרם כשצריך הגנה מהשמש.">
+<style>
+  :root {
+    --bg: #fbf9f4;
+    --bg-alt: #ffffff;
+    --text: #1f2320;
+    --text-dim: #5b6660;
+    --accent: #e8912d;
+    --accent-dim: #f4d9b3;
+    --border: #e7e2d6;
+    --code-bg: #f1ede2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a;
+      --bg-alt: #1c2024;
+      --text: #eef0ee;
+      --text-dim: #a3ada6;
+      --accent: #f0a545;
+      --accent-dim: #4a3a20;
+      --border: #2b3036;
+      --code-bg: #23272b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Noto Sans Hebrew", Arial, sans-serif;
+    line-height: 1.7;
+  }
+  header {
+    padding: 4rem 1.5rem 3rem;
+    text-align: center;
+    background: linear-gradient(180deg, var(--accent-dim) 0%, transparent 100%);
+  }
+  header .emoji { font-size: 3.5rem; display: block; margin-bottom: .5rem; }
+  header h1 { font-size: 2.4rem; margin: 0 0 .5rem; }
+  header p.tagline { color: var(--text-dim); font-size: 1.15rem; max-width: 640px; margin: 0 auto; }
+  header .badge {
+    display: inline-block; margin-top: 1.2rem; padding: .3rem .9rem;
+    border: 1px solid var(--accent); border-radius: 999px; font-size: .85rem; color: var(--accent);
+  }
+  main { max-width: 780px; margin: 0 auto; padding: 1rem 1.5rem 4rem; }
+  section { margin: 3rem 0; }
+  h2 { font-size: 1.5rem; border-right: 4px solid var(--accent); padding-right: .7rem; margin-bottom: 1rem; }
+  .card {
+    background: var(--bg-alt); border: 1px solid var(--border); border-radius: 12px;
+    padding: 1.5rem; margin-bottom: 1rem;
+  }
+  .flow {
+    display: flex; flex-direction: column; align-items: center; gap: .5rem;
+    background: var(--bg-alt); border: 1px solid var(--border); border-radius: 12px;
+    padding: 1.5rem; font-family: monospace; font-size: .95rem;
+  }
+  .flow .node { background: var(--code-bg); border-radius: 8px; padding: .6rem 1rem; text-align: center; }
+  .flow .arrow { color: var(--text-dim); }
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th, td { text-align: right; padding: .6rem .5rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-dim); font-weight: 600; }
+  code {
+    background: var(--code-bg); border-radius: 4px; padding: .15rem .4rem;
+    font-size: .9em; direction: ltr; unicode-bidi: embed;
+  }
+  pre {
+    background: var(--code-bg); border-radius: 8px; padding: 1rem; overflow-x: auto;
+    direction: ltr; text-align: left; font-size: .88rem;
+  }
+  .status-list { list-style: none; padding: 0; margin: 0; }
+  .status-list li { padding: .35rem 0; }
+  .status-list li.done::before { content: "✅ "; }
+  .status-list li.todo::before { content: "🔲 "; color: var(--text-dim); }
+  .cta {
+    display: inline-block; margin-top: .5rem; padding: .7rem 1.4rem;
+    background: var(--accent); color: #1a1a1a; border-radius: 8px;
+    text-decoration: none; font-weight: 600;
+  }
+  footer {
+    text-align: center; padding: 2rem 1.5rem 3rem; color: var(--text-dim); font-size: .85rem;
+    border-top: 1px solid var(--border);
+  }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="emoji">☀️</span>
+  <h1>SunSafe</h1>
+  <p class="tagline">מד חשיפה לשמש חכם — מעקב UV Index בזמן אמת, התראות אישיות בטלגרם,
+  מבוסס Gemini API ו-MCP (Model Context Protocol).</p>
+  <span class="badge">פרויקט גמר בקורס AI Dev</span>
+</header>
+
+<main>
+
+  <section>
+    <h2>מה זה עושה</h2>
+    <div class="card">
+      <p>SunSafe עוקב אחרי רמת קרינת ה-UV במיקום שלך בזמן אמת, ומחשב כמה זמן אפשר
+      לשהות בשמש בבטחה — בהתאם לסוג העור שלך ולשימוש בקרם הגנה. כשה-UV גבוה,
+      הבוט שולח התראה בטלגרם עם המלצה ברורה (קרם הגנה, כובע, הימנעות מחשיפה ישירה).</p>
+      <p><strong>דוגמה לשימוש:</strong> שואלים את הבוט "מה ה-UV עכשיו בתל אביב?" —
+      סוכן AI (מבוסס Gemini) קורא בזמן אמת לשרת MCP ייעודי שמביא נתוני UV חיים,
+      ומחזיר תשובה עם המלצה מותאמת אישית תוך שניות.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>ארכיטקטורה</h2>
+    <div class="flow">
+      <div class="node">משתמש (טלגרם)</div>
+      <div class="arrow">⇕</div>
+      <div class="node">Agent Loop — Gemini API + Function Calling</div>
+      <div class="arrow">⇕</div>
+      <div class="node">MCP Client ⇄ MCP Weather Server ⇄ Open-Meteo API</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Tech Stack</h2>
+    <div class="card">
+      <table>
+        <tr><th>רכיב</th><th>טכנולוגיה</th></tr>
+        <tr><td>שפה</td><td>Python 3.12</td></tr>
+        <tr><td>AI Model</td><td>Gemini API (<code>google-genai</code>)</td></tr>
+        <tr><td>Agent Loop</td><td>מיושם ידנית, ללא Framework חיצוני</td></tr>
+        <tr><td>Tool Layer</td><td>MCP (Model Context Protocol)</td></tr>
+        <tr><td>מקור מזג אוויר</td><td>Open-Meteo API (חינמי)</td></tr>
+        <tr><td>התראות</td><td>Telegram Bot API</td></tr>
+        <tr><td>DB / Dashboard</td><td>Supabase + Next.js (מתוכנן)</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>התקנה מהירה</h2>
+    <pre><code>git clone https://github.com/gil612/sunsafe.git
+cd sunsafe
+
+python -m venv venv
+venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# מלאו .env לפי .env.example
+python mcp_agent_loop.py     # בדיקת Agent Loop מול MCP Server
+python send_uv_report.py     # שליחת התראת UV בפועל לטלגרם</code></pre>
+  </section>
+
+  <section>
+    <h2>סטטוס פרויקט</h2>
+    <div class="card">
+      <ul class="status-list">
+        <li class="done">Telegram Bot מחובר ונבדק</li>
+        <li class="done">Agent Loop מול Gemini API + Tool ראשוני</li>
+        <li class="done">MCP Weather Server + Agent Loop דרך MCP Client</li>
+        <li class="done">חיבור Agent → Telegram עם fallback לטקסט רגיל</li>
+        <li class="todo">exposure_score — נוסחת חשיפה מותאמת אישית</li>
+        <li class="todo">מודל נתונים ב-Supabase</li>
+        <li class="todo">Dashboard ב-Next.js</li>
+        <li class="todo">Deploy לפרודקשן (Cloudflare)</li>
+      </ul>
+    </div>
+  </section>
+
+  <section style="text-align:center">
+    <a class="cta" href="https://github.com/gil612/sunsafe">צפו בקוד המקור ב-GitHub</a>
+  </section>
+
+</main>
+
+<footer>
+  פרויקט אקדמי — קורס AI Dev · <a href="https://github.com/gil612/sunsafe">gil612/sunsafe</a>
+</footer>
+
+</body>
+</html>
