@@ -1,20 +1,21 @@
 """
-SunSafe — חיבור Agent Loop ל-Telegram
----------------------------------------
-לוקח את התשובה החופשית מה-Agent Loop (agent_loop.py) ושולח אותה בפועל
-כהודעת Telegram, עם המרה בטוחה של פורמט ה-Markdown שג'מיני מייצר
-(**bold**) לפורמט MarkdownV2 שטלגרם דורש — כולל Fallback לטקסט רגיל
-אם ההמרה נכשלת, כדי שההדגמה בכיתה לא תיפול על שגיאת פרסינג.
+SunSafe — wiring the Agent Loop (via MCP) to Telegram
+--------------------------------------------------------
+Takes the free-form answer from the Agent Loop — now through mcp_agent_loop.py
+(which connects to mcp_weather_server.py as an MCP Client, instead of the older
+agent_loop.py with its hand-written tool) — and actually sends it as a Telegram
+message, safely converting the Markdown that Gemini produces (**bold**) into the
+MarkdownV2 format Telegram requires, with a fallback to plain text if the
+conversion fails.
 
-הרצה:
+Run:
     python send_uv_report.py
 """
 
 import logging
-import re
 
 from telegram_client import TelegramClient, TelegramError, escape_markdown_v2
-from agent_loop import agent_loop
+from mcp_agent_loop import run as run_agent_via_mcp
 
 logger = logging.getLogger("sunsafe.integration")
 logging.basicConfig(level=logging.INFO)
@@ -22,10 +23,10 @@ logging.basicConfig(level=logging.INFO)
 
 def convert_gemini_markdown_to_telegram_v2(text: str) -> str:
     """
-    ג'מיני מחזיר טקסט עם **bold** (Markdown רגיל).
-    טלגרם ב-MarkdownV2 דורש *bold* (כוכבית בודדת) וגם escape לכל
-    שאר התווים המיוחדים. הפונקציה מפצלת לפי **, הופכת כל קטע זוגי
-    ל-bold, ובורחת מכל השאר.
+    Gemini returns text with **bold** (standard Markdown).
+    Telegram's MarkdownV2 requires *bold* (a single asterisk) plus escaping of
+    every other special character. This function splits on **, turns each
+    odd-indexed segment into bold, and escapes everything else.
     """
     segments = text.split("**")
     converted = []
@@ -44,15 +45,15 @@ def send_agent_answer_to_telegram(
     chat_id: str | int | None = None,
 ) -> str:
     """
-    מריץ את ה-Agent Loop על task נתון, ושולח את התשובה לטלגרם.
-    מנסה קודם MarkdownV2 מפורמט; אם טלגרם מחזיר שגיאת פרסינג —
-    שולח שוב כטקסט רגיל, כדי שההדגמה תמיד תצליח.
-    מחזיר את הטקסט הגולמי שהוחזר מה-Agent (שימושי גם ללוגים/בדיקות).
+    Run the Agent Loop (via MCP) on a given task and send the answer to Telegram.
+    Tries formatted MarkdownV2 first; if Telegram returns a parsing error, resends
+    as plain text so the demo always succeeds.
+    Returns the raw text returned by the agent (also useful for logs/tests).
     """
     client = client or TelegramClient()
 
-    logger.info("Running agent loop for task: %s", task)
-    answer = agent_loop(task)
+    logger.info("Running MCP agent loop for task: %s", task)
+    answer = run_agent_via_mcp(task)
     logger.info("Agent answer: %s", answer)
 
     formatted = convert_gemini_markdown_to_telegram_v2(answer)
@@ -73,4 +74,4 @@ if __name__ == "__main__":
         "מה ה-UV Index הנוכחי בתל אביב? (קואורדינטות: lat=32.08, lon=34.78). "
         "תן תשובה קצרה בעברית, כולל אם צריך הגנה מהשמש עכשיו."
     )
-    print("ההודעה נשלחה לטלגרם.")
+    print("ההודעה נשלחה לטלגרם (דרך MCP).")

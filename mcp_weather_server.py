@@ -1,16 +1,16 @@
 """
 SunSafe — Weather MCP Server
 ------------------------------
-שרת MCP עצמאי שעוטף את Open-Meteo (חינמי, ללא API key) וחושף כלי מזג-אוויר
-כ-MCP Tools סטנדרטיים. השרת הזה יכול לשמש גם ל-Agent Loop בפרודקשן (דרך
-mcp_agent_loop.py) וגם ל-Claude Desktop / Claude Code לבדיקה ידנית —
-בלי לכתוב את לוגיקת ה-Weather פעמיים.
+A standalone MCP server wrapping Open-Meteo (free, no API key) and exposing
+weather tools as standard MCP Tools. The same server serves both the production
+Agent Loop (via mcp_agent_loop.py) and Claude Desktop / Claude Code for manual
+testing — without writing the weather logic twice.
 
-הרצה עצמאית (למשל לחיבור מ-Claude Desktop):
+Run standalone (for example, to connect from Claude Desktop):
     python mcp_weather_server.py
 
-בדרך כלל לא מריצים את זה ידנית — ה-MCP Client (למשל mcp_agent_loop.py)
-מפעיל את הקובץ הזה כתת-תהליך אוטומטית דרך stdio.
+Usually you do not run this by hand — the MCP Client (e.g. mcp_agent_loop.py)
+spawns this file as a subprocess automatically over stdio.
 """
 
 import logging
@@ -29,8 +29,9 @@ OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 @mcp.tool()
 async def get_current_uv(lat: float, lon: float) -> dict:
     """
-    מחזיר את מדד ה-UV הנוכחי, הטמפרטורה וכיסוי העננים למיקום גיאוגרפי נתון.
-    יש לקרוא לכלי הזה כל פעם שצריך מידע עדכני על רמת קרינת UV במקום מסוים.
+    Return the current UV index, temperature and cloud cover for a given
+    geographic location. Call this tool whenever up-to-date information about
+    the UV radiation level at a specific place is needed.
     """
     logger.info("get_current_uv(lat=%s, lon=%s)", lat, lon)
     async with httpx.AsyncClient() as client:
@@ -50,8 +51,9 @@ async def get_current_uv(lat: float, lon: float) -> dict:
 @mcp.tool()
 async def get_uv_forecast(lat: float, lon: float, days: int = 3) -> dict:
     """
-    מחזיר תחזית UV Index שעתית ל-N הימים הקרובים (ברירת מחדל: 3) עבור
-    מיקום גיאוגרפי נתון. שימושי לתכנון חשיפה מראש, לא רק למצב הנוכחי.
+    Return an hourly UV Index forecast for the next N days (default: 3) for a
+    given geographic location. Useful for planning exposure ahead of time, not
+    just for the current conditions.
     """
     logger.info("get_uv_forecast(lat=%s, lon=%s, days=%s)", lat, lon, days)
     async with httpx.AsyncClient() as client:

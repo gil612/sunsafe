@@ -1,16 +1,17 @@
 """
-SunSafe — Agent Loop מול MCP Weather Server
------------------------------------------------
-גרסה מעודכנת של agent_loop.py: במקום כלים מוגדרים ידנית ב-Python
-(TOOLS dict), הכלים מגיעים דינמית משרת MCP (mcp_weather_server.py) —
-ה-Agent Loop "לא יודע" איך בנוי ה-Weather API, הוא רק מדבר עם MCP.
-זה מאפשר להחליף ספק (Open-Meteo -> משהו אחר) בלי לגעת בלוגיקת הסוכן,
-ולהשתמש באותו שרת גם מ-Claude Desktop לבדיקות ידניות.
+SunSafe — Agent Loop against the MCP Weather Server
+-------------------------------------------------------
+An updated version of agent_loop.py: instead of tools hand-defined in Python
+(the TOOLS dict), the tools are discovered dynamically from an MCP server
+(mcp_weather_server.py) — the Agent Loop "does not know" how the weather API is
+built, it only talks to MCP. This makes it possible to swap providers
+(Open-Meteo -> something else) without touching the agent logic, and to use the
+same server from Claude Desktop for manual testing.
 
-התקנה:
+Install:
     pip install mcp google-genai python-dotenv httpx
 
-הרצה כבדיקה עצמאית:
+Run as a standalone check:
     python mcp_agent_loop.py
 """
 
@@ -48,7 +49,7 @@ DEFAULT_SERVER_PARAMS = StdioServerParameters(
 
 
 def make_client() -> genai.Client:
-    """Gemini Developer API — מסלול הברירת מחדל של הקורס (API Key, ללא GCP)."""
+    """Gemini Developer API — the course's default track (API key, no GCP)."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -60,9 +61,9 @@ def make_client() -> genai.Client:
 
 def _normalize_schema_types(schema: dict) -> dict:
     """
-    MCP מחזיר JSON Schema עם types באותיות קטנות ("object", "string"),
-    בעוד שה-SDK של Gemini מצפה לאותיות גדולות ("OBJECT", "STRING").
-    הפונקציה הזו ממירה רקורסיבית בין הפורמטים.
+    MCP returns a JSON Schema with lowercase types ("object", "string"), while
+    the Gemini SDK expects uppercase ones ("OBJECT", "STRING"). This function
+    converts recursively between the two formats.
     """
     if not isinstance(schema, dict):
         return schema
@@ -80,7 +81,7 @@ def _normalize_schema_types(schema: dict) -> dict:
 
 
 def mcp_tools_to_function_declarations(mcp_tools) -> list[types.FunctionDeclaration]:
-    """ממיר רשימת Tools שהתקבלה מ-session.list_tools() ל-FunctionDeclaration של Gemini."""
+    """Convert a list of tools from session.list_tools() into Gemini FunctionDeclarations."""
     declarations = []
     for tool in mcp_tools:
         schema = _normalize_schema_types(
@@ -97,7 +98,7 @@ def mcp_tools_to_function_declarations(mcp_tools) -> list[types.FunctionDeclarat
 
 
 def _parse_tool_result(result) -> object:
-    """מחלץ תוצאה קריאה מתוך CallToolResult (לרוב TextContent עם JSON בפנים)."""
+    """Extract a readable result from a CallToolResult (usually TextContent holding JSON)."""
     texts = [c.text for c in result.content if hasattr(c, "text")]
     joined = "\n".join(texts)
     try:
@@ -160,7 +161,7 @@ async def agent_loop_mcp(
 
 
 def run(task: str, server_params: StdioServerParameters = DEFAULT_SERVER_PARAMS) -> str:
-    """עטיפה סינכרונית נוחה לקריאה מקוד רגיל (למשל send_uv_report.py)."""
+    """A convenient synchronous wrapper for calling from regular code (e.g. send_uv_report.py)."""
     return asyncio.run(agent_loop_mcp(task, server_params))
 
 
