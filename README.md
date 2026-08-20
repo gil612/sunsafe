@@ -1,3 +1,4 @@
+<div dir="rtl">
 # ☀️ SunSafe
 
 מד חשיפה לשמש חכם — מעקב UV Index בזמן אמת, התראות אישיות בטלגרם, מבוסס
@@ -25,13 +26,15 @@ Gemini) קורא בזמן אמת לשרת MCP ייעודי שמביא נתוני
                  MCP Client ⇄ MCP Weather Server ⇄ Open-Meteo API
 ```
 
-- **Agent Loop** — מיושם ידנית ב-Python מול Gemini API (`google-genai`),
-  ללא Framework חיצוני.
-- **MCP Weather Server** — שרת עצמאי שעוטף את Open-Meteo (חינמי, ללא
-  API key) וחושף כלי מזג-אוויר (`get_current_uv`, `get_uv_forecast`)
-  כ-MCP Tools סטנדרטיים. אותו שרת אפשר לחבר גם ל-Claude Desktop לבדיקה
-  ידנית.
-- **Telegram Bot** — ממשק המשתמש להתראות ולשאילתות בזמן אמת.
+<div dir="rtl">
+Agent Loop: מיושם ידנית ב-Python מול Gemini API (`google-genai`), ללא Framework חיצוני.
+
+<div dir="rtl">
+MCP Weather Server: שרת עצמאי שעוטף את Open-Meteo (חינמי, ללא API key) וחושף כלי מזג-אוויר (`get_current_uv`, `get_uv_forecast`) כ-MCP Tools סטנדרטיים. אותו שרת אפשר לחבר גם ל-Claude Desktop לבדיקה ידנית.
+<div dir="rtl">
+Telegram Bot: ממשק המשתמש להתראות ולשאילתות בזמן אמת.
+
+<br>
 
 לפירוט טכני מלא, קונבנציות פיתוח, והחלטות ארכיטקטורה — ראו [`CLAUDE.md`](./CLAUDE.md).
 
@@ -70,3 +73,5 @@ python send_uv_report.py     # שליחת התראת UV בפועל לטלגרם
 ## רישיון
 
 פרויקט אקדמי — קורס AI Dev.
+
+</div>
