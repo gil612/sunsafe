@@ -4,144 +4,320 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SunSafe — מד חשיפה לשמש חכם</title>
-<meta name="description" content="SunSafe עוקב אחרי רמת קרינת UV בזמן אמת, ומתריע בטלגרם כשצריך הגנה מהשמש.">
+<meta name="description" content="SunSafe: מעקב UV Index בזמן אמת, התראות מותאמות אישית בטלגרם, מבוסס Gemini API ו-MCP.">
 <style>
-  :root {
-    --bg: #fbf9f4;
-    --bg-alt: #ffffff;
-    --text: #1f2320;
-    --text-dim: #5b6660;
-    --accent: #e8912d;
-    --accent-dim: #f4d9b3;
-    --border: #e7e2d6;
-    --code-bg: #f1ede2;
+  :root{
+    --bg:#0f1626;
+    --bg-alt:#141d33;
+    --card:#1a2440;
+    --card-border:#2a355a;
+    --text:#eef1f8;
+    --text-dim:#a9b3cc;
+    --sun:#ffb547;
+    --sun-soft:#ffd88a;
+    --sky:#5eb8ff;
+    --safe:#4fd1a5;
+    --warn:#ff8a5c;
+    --radius:16px;
+    --shadow:0 12px 32px rgba(0,0,0,.35);
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #14171a;
-      --bg-alt: #1c2024;
-      --text: #eef0ee;
-      --text-dim: #a3ada6;
-      --accent: #f0a545;
-      --accent-dim: #4a3a20;
-      --border: #2b3036;
-      --code-bg: #23272b;
-    }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    font-family:"Segoe UI","Heebo","Arial Hebrew",system-ui,-apple-system,sans-serif;
+    background:
+      radial-gradient(1200px 600px at 85% -10%, rgba(255,181,71,.18), transparent 60%),
+      radial-gradient(900px 500px at -10% 10%, rgba(94,184,255,.14), transparent 55%),
+      var(--bg);
+    color:var(--text);
+    line-height:1.65;
   }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: -apple-system, "Segoe UI", "Noto Sans Hebrew", Arial, sans-serif;
-    line-height: 1.7;
+  .wrap{max-width:980px;margin:0 auto;padding:0 24px;}
+
+  header.hero{
+    padding:96px 0 72px;
+    text-align:center;
+    position:relative;
   }
-  header {
-    padding: 4rem 1.5rem 3rem;
-    text-align: center;
-    background: linear-gradient(180deg, var(--accent-dim) 0%, transparent 100%);
+  .badge{
+    display:inline-block;
+    padding:6px 16px;
+    border-radius:999px;
+    background:rgba(255,181,71,.12);
+    border:1px solid rgba(255,181,71,.35);
+    color:var(--sun-soft);
+    font-size:13px;
+    font-weight:600;
+    letter-spacing:.02em;
+    margin-bottom:24px;
   }
-  header .emoji { font-size: 3.5rem; display: block; margin-bottom: .5rem; }
-  header h1 { font-size: 2.4rem; margin: 0 0 .5rem; }
-  header p.tagline { color: var(--text-dim); font-size: 1.15rem; max-width: 640px; margin: 0 auto; }
-  header .badge {
-    display: inline-block; margin-top: 1.2rem; padding: .3rem .9rem;
-    border: 1px solid var(--accent); border-radius: 999px; font-size: .85rem; color: var(--accent);
+  .hero h1{
+    font-size:clamp(2.4rem,6vw,3.6rem);
+    margin:0 0 16px;
+    font-weight:800;
+    background:linear-gradient(90deg,var(--sun) 0%,var(--sun-soft) 45%,var(--sky) 100%);
+    -webkit-background-clip:text;
+    background-clip:text;
+    color:transparent;
+    letter-spacing:-.02em;
   }
-  main { max-width: 780px; margin: 0 auto; padding: 1rem 1.5rem 4rem; }
-  section { margin: 3rem 0; }
-  h2 { font-size: 1.5rem; border-right: 4px solid var(--accent); padding-right: .7rem; margin-bottom: 1rem; }
-  .card {
-    background: var(--bg-alt); border: 1px solid var(--border); border-radius: 12px;
-    padding: 1.5rem; margin-bottom: 1rem;
+  .hero p.tagline{
+    font-size:clamp(1.05rem,2.4vw,1.3rem);
+    color:var(--text-dim);
+    max-width:680px;
+    margin:0 auto 36px;
   }
-  .flow {
-    display: flex; flex-direction: column; align-items: center; gap: .5rem;
-    background: var(--bg-alt); border: 1px solid var(--border); border-radius: 12px;
-    padding: 1.5rem; font-family: monospace; font-size: .95rem;
+  .cta-row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;}
+  .btn{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    padding:13px 26px;
+    border-radius:12px;
+    font-weight:700;
+    font-size:15px;
+    text-decoration:none;
+    transition:transform .15s ease, box-shadow .15s ease;
   }
-  .flow .node { background: var(--code-bg); border-radius: 8px; padding: .6rem 1rem; text-align: center; }
-  .flow .arrow { color: var(--text-dim); }
-  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
-  th, td { text-align: right; padding: .6rem .5rem; border-bottom: 1px solid var(--border); }
-  th { color: var(--text-dim); font-weight: 600; }
-  code {
-    background: var(--code-bg); border-radius: 4px; padding: .15rem .4rem;
-    font-size: .9em; direction: ltr; unicode-bidi: embed;
+  .btn:hover{transform:translateY(-2px);}
+  .btn-primary{
+    background:linear-gradient(135deg,var(--sun),#ff9d4d);
+    color:#231204;
+    box-shadow:0 8px 24px rgba(255,181,71,.35);
   }
-  pre {
-    background: var(--code-bg); border-radius: 8px; padding: 1rem; overflow-x: auto;
-    direction: ltr; text-align: left; font-size: .88rem;
+  .btn-secondary{
+    background:transparent;
+    color:var(--text);
+    border:1.5px solid var(--card-border);
   }
-  .status-list { list-style: none; padding: 0; margin: 0; }
-  .status-list li { padding: .35rem 0; }
-  .status-list li.done::before { content: "✅ "; }
-  .status-list li.todo::before { content: "🔲 "; color: var(--text-dim); }
-  .cta {
-    display: inline-block; margin-top: .5rem; padding: .7rem 1.4rem;
-    background: var(--accent); color: #1a1a1a; border-radius: 8px;
-    text-decoration: none; font-weight: 600;
+  .btn-secondary:hover{border-color:var(--sky);}
+
+  section{padding:56px 0;}
+  section.alt{background:linear-gradient(180deg,transparent,rgba(20,29,51,.5) 12%,rgba(20,29,51,.5) 88%,transparent);}
+  h2{
+    font-size:clamp(1.5rem,3.5vw,2rem);
+    margin:0 0 8px;
+    font-weight:800;
   }
-  footer {
-    text-align: center; padding: 2rem 1.5rem 3rem; color: var(--text-dim); font-size: .85rem;
-    border-top: 1px solid var(--border);
+  h2 .em{color:var(--sun);}
+  .section-sub{color:var(--text-dim);margin:0 0 36px;font-size:1.02rem;max-width:640px;}
+
+  .card-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    gap:18px;
   }
-  a { color: var(--accent); }
+  .card{
+    background:var(--card);
+    border:1px solid var(--card-border);
+    border-radius:var(--radius);
+    padding:26px 22px;
+    box-shadow:var(--shadow);
+  }
+  .card .icon{font-size:1.8rem;margin-bottom:12px;display:block;}
+  .card h3{margin:0 0 8px;font-size:1.08rem;}
+  .card p{margin:0;color:var(--text-dim);font-size:.95rem;}
+
+  .arch{
+    background:var(--card);
+    border:1px solid var(--card-border);
+    border-radius:var(--radius);
+    padding:36px 28px;
+    box-shadow:var(--shadow);
+  }
+  .arch-flow{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    flex-wrap:wrap;
+    gap:10px;
+    font-size:.98rem;
+    font-weight:600;
+  }
+  .arch-node{
+    background:var(--bg-alt);
+    border:1px solid var(--card-border);
+    border-radius:10px;
+    padding:12px 16px;
+    text-align:center;
+    min-width:150px;
+  }
+  .arch-node.hl{border-color:var(--sun);color:var(--sun-soft);}
+  .arch-arrow{color:var(--text-dim);font-size:1.2rem;}
+  .arch-note{margin-top:22px;color:var(--text-dim);font-size:.92rem;text-align:center;}
+
+  table.stack{
+    width:100%;
+    border-collapse:collapse;
+    background:var(--card);
+    border:1px solid var(--card-border);
+    border-radius:var(--radius);
+    overflow:hidden;
+  }
+  table.stack th, table.stack td{
+    padding:13px 18px;
+    text-align:right;
+    font-size:.94rem;
+  }
+  table.stack th{
+    background:var(--bg-alt);
+    color:var(--sun-soft);
+    font-weight:700;
+  }
+  table.stack tr:not(:last-child) td{border-bottom:1px solid var(--card-border);}
+  table.stack td:first-child{font-weight:700;color:var(--text);}
+  table.stack td:nth-child(3){color:var(--text-dim);}
+
+  .status-list{list-style:none;margin:0;padding:0;display:grid;gap:10px;}
+  .status-list li{
+    display:flex;
+    align-items:flex-start;
+    gap:10px;
+    background:var(--card);
+    border:1px solid var(--card-border);
+    border-radius:12px;
+    padding:14px 16px;
+    font-size:.95rem;
+  }
+  .status-list li.done::before{content:"✅";color:var(--safe);font-weight:800;}
+  .status-list li.todo::before{content:"▢";color:var(--text-dim);font-weight:800;}
+
+  pre{
+    background:#0b111e;
+    border:1px solid var(--card-border);
+    border-radius:12px;
+    padding:20px;
+    overflow-x:auto;
+    font-size:.88rem;
+    direction:ltr;
+    text-align:left;
+    color:#d8e0f5;
+  }
+  code{font-family:"Cascadia Code","Consolas",monospace;}
+
+  footer{
+    text-align:center;
+    padding:48px 24px 64px;
+    color:var(--text-dim);
+    font-size:.9rem;
+    border-top:1px solid var(--card-border);
+  }
+  footer a{color:var(--sun-soft);text-decoration:none;}
+  footer a:hover{text-decoration:underline;}
+
+  @media (max-width:640px){
+    header.hero{padding:64px 0 48px;}
+    section{padding:40px 0;}
+  }
 </style>
 </head>
 <body>
 
-<header>
-  <span class="emoji">☀️</span>
-  <h1>SunSafe</h1>
-  <p class="tagline">מד חשיפה לשמש חכם — מעקב UV Index בזמן אמת, התראות אישיות בטלגרם,
-  מבוסס Gemini API ו-MCP (Model Context Protocol).</p>
-  <span class="badge">פרויקט גמר בקורס AI Dev</span>
+<header class="hero">
+  <div class="wrap">
+    <span class="badge">☀️ פרויקט גמר · קורס AI Dev</span>
+    <h1>SunSafe</h1>
+    <p class="tagline">מד חשיפה לשמש חכם — מעקב UV Index בזמן אמת, המלצות מותאמות אישית, והתראות בטלגרם. מבוסס Gemini API ו-MCP (Model Context Protocol).</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/gil612/sunsafe" target="_blank" rel="noopener">צפייה ב-GitHub →</a>
+      <a class="btn btn-secondary" href="#how">איך זה עובד</a>
+    </div>
+  </div>
 </header>
 
-<main>
-
-  <section>
-    <h2>מה זה עושה</h2>
-    <div class="card">
-      <p>SunSafe עוקב אחרי רמת קרינת ה-UV במיקום שלך בזמן אמת, ומחשב כמה זמן אפשר
-      לשהות בשמש בבטחה — בהתאם לסוג העור שלך ולשימוש בקרם הגנה. כשה-UV גבוה,
-      הבוט שולח התראה בטלגרם עם המלצה ברורה (קרם הגנה, כובע, הימנעות מחשיפה ישירה).</p>
-      <p><strong>דוגמה לשימוש:</strong> שואלים את הבוט "מה ה-UV עכשיו בתל אביב?" —
-      סוכן AI (מבוסס Gemini) קורא בזמן אמת לשרת MCP ייעודי שמביא נתוני UV חיים,
-      ומחזיר תשובה עם המלצה מותאמת אישית תוך שניות.</p>
+<section>
+  <div class="wrap">
+    <h2>מה <span class="em">SunSafe</span> עושה</h2>
+    <p class="section-sub">המערכת עוקבת אחר רמת קרינת ה-UV במיקום שלך בזמן אמת, ומחשבת כמה זמן אפשר לשהות בשמש בבטחה — בהתאם לסוג העור שלך ולשימוש בקרם הגנה. כשה-UV גבוה, הבוט שולח התראה עם המלצה ברורה.</p>
+    <div class="card-grid">
+      <div class="card">
+        <span class="icon">💡</span>
+        <h3>UV בזמן אמת</h3>
+        <p>נתוני UV Index חיים לפי מיקום, דרך Open-Meteo — ללא צורך במפתח API.</p>
+      </div>
+      <div class="card">
+        <span class="icon">🧴</span>
+        <h3>המלצה מותאמת</h3>
+        <p>חישוב זמן חשיפה בטוח לפי סוג עור (סולם Fitzpatrick) ושימוש בקרם הגנה.</p>
+      </div>
+      <div class="card">
+        <span class="icon">🤖</span>
+        <h3>סוכן AI</h3>
+        <p>סוכן מבוסס Gemini עונה על שאלות כמו "מה ה-UV עכשיו בתל אביב?" בזמן אמת.</p>
+      </div>
+      <div class="card">
+        <span class="icon">📲</span>
+        <h3>התראות בטלגרם</h3>
+        <p>בוט טלגרם (<code>gil612Bot</code>) שולח התראות ותשובות לשאילתות בצ'אט.</p>
+      </div>
     </div>
-  </section>
+  </div>
+</section>
 
-  <section>
-    <h2>ארכיטקטורה</h2>
-    <div class="flow">
-      <div class="node">משתמש (טלגרם)</div>
-      <div class="arrow">⇕</div>
-      <div class="node">Agent Loop — Gemini API + Function Calling</div>
-      <div class="arrow">⇕</div>
-      <div class="node">MCP Client ⇄ MCP Weather Server ⇄ Open-Meteo API</div>
+<section class="alt" id="how">
+  <div class="wrap">
+    <h2>איך זה <span class="em">עובד</span></h2>
+    <p class="section-sub">ארכיטקטורה מבוססת MCP: הסוכן קורא לשרת MCP ייעודי שמביא נתוני UV חיים, ומחזיר תשובה עם המלצה תוך שניות.</p>
+    <div class="arch">
+      <div class="arch-flow">
+        <div class="arch-node">👤 משתמש (טלגרם)</div>
+        <div class="arch-arrow">⇄</div>
+        <div class="arch-node hl">Agent Loop<br><small>Gemini API + Function Calling</small></div>
+        <div class="arch-arrow">⇄</div>
+        <div class="arch-node">MCP Client</div>
+        <div class="arch-arrow">⇄</div>
+        <div class="arch-node">MCP Weather Server</div>
+        <div class="arch-arrow">⇄</div>
+        <div class="arch-node">Open-Meteo API</div>
+      </div>
+      <p class="arch-note">Agent Loop מיושם ידנית ב-Python מול Gemini API (<code>google-genai</code>), ללא Framework חיצוני. שרת ה-MCP חושף כלי מזג-אוויר (<code>get_current_uv</code>, <code>get_uv_forecast</code>) וניתן לחבר אותו גם ל-Claude Desktop.</p>
     </div>
-  </section>
+  </div>
+</section>
 
-  <section>
-    <h2>Tech Stack</h2>
-    <div class="card">
-      <table>
-        <tr><th>רכיב</th><th>טכנולוגיה</th></tr>
-        <tr><td>שפה</td><td>Python 3.12</td></tr>
-        <tr><td>AI Model</td><td>Gemini API (<code>google-genai</code>)</td></tr>
-        <tr><td>Agent Loop</td><td>מיושם ידנית, ללא Framework חיצוני</td></tr>
-        <tr><td>Tool Layer</td><td>MCP (Model Context Protocol)</td></tr>
-        <tr><td>מקור מזג אוויר</td><td>Open-Meteo API (חינמי)</td></tr>
-        <tr><td>התראות</td><td>Telegram Bot API</td></tr>
-        <tr><td>DB / Dashboard</td><td>Supabase + Next.js (מתוכנן)</td></tr>
-      </table>
-    </div>
-  </section>
+<section>
+  <div class="wrap">
+    <h2>Tech <span class="em">Stack</span></h2>
+    <p class="section-sub">הרכיבים הטכנולוגיים של הפרויקט.</p>
+    <table class="stack">
+      <thead><tr><th>רכיב</th><th>טכנולוגיה</th><th>הערות</th></tr></thead>
+      <tbody>
+        <tr><td>שפה</td><td>Python 3.12</td><td>סביבה וירטואלית (venv)</td></tr>
+        <tr><td>AI Model</td><td>Gemini API — gemini-3.5-flash-lite</td><td>Developer API, לא Vertex AI</td></tr>
+        <tr><td>Agent Loop</td><td>מיושם ידנית</td><td>ללא LangChain/AutoGen</td></tr>
+        <tr><td>Tool Layer</td><td>MCP (mcp&gt;=1.27,&lt;2.0)</td><td>Model Context Protocol</td></tr>
+        <tr><td>מקור מזג אוויר</td><td>Open-Meteo API</td><td>חינמי, ללא API key</td></tr>
+        <tr><td>התראות</td><td>Telegram Bot API</td><td>gil612Bot</td></tr>
+        <tr><td>DB (מתוכנן)</td><td>Supabase (Postgres)</td><td>טרם מומש</td></tr>
+        <tr><td>Dashboard (מתוכנן)</td><td>Next.js + Tailwind</td><td>טרם מומש</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
 
-  <section>
-    <h2>התקנה מהירה</h2>
+<section class="alt">
+  <div class="wrap">
+    <h2>סטטוס <span class="em">הפרויקט</span></h2>
+    <p class="section-sub">בפיתוח פעיל.</p>
+    <ul class="status-list">
+      <li class="done">Telegram Bot מחובר ונבדק</li>
+      <li class="done">Agent Loop מול Gemini API + Tool ראשוני</li>
+      <li class="done">MCP Weather Server + Agent Loop דרך MCP Client</li>
+      <li class="done">חיבור Agent → Telegram עם fallback לטקסט רגיל</li>
+      <li class="done">Git עם feature branches ו-PRs מסודרים</li>
+      <li class="todo">exposure_score — מדד חשיפה יחיד 0-100+ (UV, זמן, סוג עור, קרם הגנה)</li>
+      <li class="todo">מודל נתונים ב-Supabase</li>
+      <li class="todo">Dashboard ב-Next.js</li>
+      <li class="todo">Deploy לפרודקשן (Cloudflare Workers/Pages)</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>הרצה <span class="em">מקומית</span></h2>
+    <p class="section-sub">דרישות: Python 3.12+, חשבון Telegram, מפתח Gemini API חינמי.</p>
     <pre><code>git clone https://github.com/gil612/sunsafe.git
 cd sunsafe
 
@@ -149,35 +325,17 @@ python -m venv venv
 venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# מלאו .env לפי .env.example
+# העתיקו .env.example ל-.env ומלאו BOT_TOKEN, CHAT_ID, GEMINI_API_KEY
+
 python mcp_agent_loop.py     # בדיקת Agent Loop מול MCP Server
 python send_uv_report.py     # שליחת התראת UV בפועל לטלגרם</code></pre>
-  </section>
-
-  <section>
-    <h2>סטטוס פרויקט</h2>
-    <div class="card">
-      <ul class="status-list">
-        <li class="done">Telegram Bot מחובר ונבדק</li>
-        <li class="done">Agent Loop מול Gemini API + Tool ראשוני</li>
-        <li class="done">MCP Weather Server + Agent Loop דרך MCP Client</li>
-        <li class="done">חיבור Agent → Telegram עם fallback לטקסט רגיל</li>
-        <li class="todo">exposure_score — נוסחת חשיפה מותאמת אישית</li>
-        <li class="todo">מודל נתונים ב-Supabase</li>
-        <li class="todo">Dashboard ב-Next.js</li>
-        <li class="todo">Deploy לפרודקשן (Cloudflare)</li>
-      </ul>
-    </div>
-  </section>
-
-  <section style="text-align:center">
-    <a class="cta" href="https://github.com/gil612/sunsafe">צפו בקוד המקור ב-GitHub</a>
-  </section>
-
-</main>
+  </div>
+</section>
 
 <footer>
-  פרויקט אקדמי — קורס AI Dev · <a href="https://github.com/gil612/sunsafe">gil612/sunsafe</a>
+  <div class="wrap">
+    <p>פרויקט אקדמי — קורס AI Dev · <a href="https://github.com/gil612/sunsafe" target="_blank" rel="noopener">github.com/gil612/sunsafe</a></p>
+  </div>
 </footer>
 
 </body>
