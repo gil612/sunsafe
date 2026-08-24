@@ -75,7 +75,13 @@ python send_uv_report.py "אילת"      # בדיקת שליחה בפועל לט
 ✅ עיר כפרמטר argv (`python send_uv_report.py "<עיר>"`) — עם ולידציה
   אמיתית מול Open-Meteo Geocoding (לא ניחוש lat/lon), כולל טיפול בשגיאות
   הקלדה/עיר לא מוכרת עם הודעת שגיאה ברורה במקום ניחוש<br>
-✅ Git עם feature branches ו-PRs מסודרים; docstrings תורגמו לאנגלית
+✅ Git עם feature branches ו-PRs מסודרים; docstrings תורגמו לאנגלית<br>
+✅ Supabase logging חי לשתי הטבלאות הראשונות: `uv_readings` (נכתב על-ידי
+  הסוכן עצמו, דרך כלי ה-MCP `log_uv_reading`, מיד אחרי `get_current_uv`)
+  ו-`alerts_sent` (נכתב מקוד חיצוני ב-`send_uv_report.py`, אחרי כל שליחה
+  אמיתית לטלגרם — גם בהצלחה וגם בנתיב "עיר לא זוהתה"). נבדק קצה-לקצה:
+  נתיב הצלחה כותב לשתי הטבלאות, נתיב "עיר לא זוהתה" כותב רק ל-`alerts_sent`
+  (`uv_reading_id` נשאר NULL) בלי לגעת ב-`uv_readings`
 
 ## TODO (לפי סדר עדיפות)
 
@@ -106,8 +112,10 @@ python send_uv_report.py "אילת"      # בדיקת שליחה בפועל לט
    הרצה היא שאילתת עיר בודדת חד-פעמית, לא שיחה רב-שלבית עם המשתמש
    [ממפגישת מעקב 20.08.2026 עם שון גרייס]
 
-6. מודל נתונים ב-Supabase: users, locations, uv_readings,
-   exposure_log, alerts_sent
+6. מודל נתונים ב-Supabase — פלח ראשון **בוצע**: `uv_readings` ו-`alerts_sent`
+   קיימות וחיות (ראו "סטטוס נוכחי" למעלה). נותרו: `users`, `locations`,
+   `exposure_log` — אלה תלויות בנוסחת ה-exposure_score (calculate_exposure_score,
+   סעיף 1 למעלה) שעדיין לא מומשה, ולכן ממתינות לה
 
 7. Dashboard ב-Next.js: היסטוריה, גרפים, הגדרות פרופיל (סוג עור, מיקום)
 
