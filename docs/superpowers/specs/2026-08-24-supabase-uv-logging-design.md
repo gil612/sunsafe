@@ -116,8 +116,8 @@ async def log_uv_reading(
 
 ## `alerts_sent` — כתיבה מ-`send_uv_report.py`
 
-פונקציה חדשה, `log_alert_sent(uv_reading_id, chat_id, message_text,
-parse_mode, status)`, נקראת מ-`send_agent_answer_to_telegram` **פעם
+פונקציה חדשה, `log_alert_sent(chat_id, message_text, parse_mode)`,
+נקראת מ-`send_agent_answer_to_telegram` **פעם
 אחת בלבד**, אחרי שההודעה נשלחה בפועל בהצלחה (בין אם ב-MarkdownV2
 ובין אם ב-fallback לטקסט רגיל) — עם `status="sent"` ו-`parse_mode`
 המשקף את השיטה שבאמת הצליחה (`"MarkdownV2"` או `None`).

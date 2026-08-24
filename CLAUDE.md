@@ -1,3 +1,49 @@
+# CLAUDE.md
+
+מסמך זה מיועד לספק הקשר ל-Claude Code (ולכל מפתח/ת) כשעובדים על הפרויקט.
+הוא מתאר את הפרויקט, את ה-Tech Stack, ואת הקונבנציות שיש לשמור עליהן.
+
+## על הפרויקט
+
+**SunSafe** — אפליקציה למעקב אחר חשיפה אישית לקרינת UV. המערכת קוראת UV Index
+בזמן אמת לפי מיקום, ומחשבת "זמן חשיפה בטוח" מותאם אישית (לפי סוג עור בסולם
+Fitzpatrick ושימוש בקרם הגנה), ומתריעה למשתמש בטלגרם כשצריך הגנה מהשמש.
+
+הפרויקט נבנה כפרויקט גמר בקורס AI Dev, ומבוסס על וריאציה של "פרויקט ג' —
+סוכן Intelligence יומי עם Telegram" מה-SPEC של הקורס, עם תוספת של MCP Server
+עצמאי במקום כלים המוגדרים ידנית בקוד.
+
+## Tech Stack
+
+| רכיב | טכנולוגיה | הערות |
+|---|---|---|
+| שפה | Python 3.12 | סביבה וירטואלית (`venv`) |
+| AI Model | Gemini API (`google-genai`), מודל `gemini-3.5-flash-lite` | מסלול Developer API עם `GEMINI_API_KEY` — **לא** Vertex AI. נבחר כברירת המחדל של הקורס; לא דורש פרויקט GCP או billing. |
+| Agent Loop | מיושם ידנית (`mcp_agent_loop.py`) | ללא Framework חיצוני (לא LangChain/AutoGen) |
+| Tool Layer | MCP (Model Context Protocol), חבילת `mcp` | ראה "החלטות טכניות" למטה לגבי גרסה |
+| מקור מזג אוויר | Open-Meteo API | חינמי, ללא API key |
+| התראות | Telegram Bot API | Bot: `gil612Bot` |
+| DB | Supabase (Postgres) | פלח ראשון מומש: `uv_readings` + `alerts_sent` (לוגינג). `users`/`locations`/`exposure_log` עדיין לא מומשו |
+| Dashboard (מתוכנן) | Next.js + Tailwind | טרם מומש |
+| Hosting (מתוכנן) | Cloudflare Workers + Pages, Cloudflare Cron Triggers | טרם מומש |
+| ניהול גרסאות | Git + GitHub, `github.com/gil612/sunsafe` | ראה Conventions למטה |
+
+## מבנה הקבצים הנוכחי
+
+```
+sunsafe/
+├── telegram_client.py       # עטיפת Telegram Bot API: send_text_message, send_uv_alert, escape_markdown_v2
+├── mcp_weather_server.py     # שרת MCP עצמאי שעוטף Open-Meteo, 4 כלים: geocode_city, get_current_uv, get_uv_forecast, log_uv_reading
+├── mcp_agent_loop.py         # גרסת ה-Agent Loop שמתחברת ל-mcp_weather_server.py כ-MCP Client (הגרסה הנוכחית/production)
+├── send_uv_report.py         # מחבר בין mcp_agent_loop לבין Telegram: מריץ שאלה, ממיר Markdown, שולח בפועל, ורושם ל-alerts_sent
+├── supabase_client.py         # עטיפה דקה סביב Supabase REST API (PostgREST) להוספת שורות, על גבי httpx בלבד (ללא supabase-py)
+├── supabase_schema.sql        # סכמת ה-DB ב-Supabase: טבלאות uv_readings ו-alerts_sent
+├── .env / .env.example       # BOT_TOKEN, CHAT_ID, GEMINI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (הקובץ .env אף פעם לא ב-Git)
+├── requirements.txt
+├── .gitignore                # כולל .env, venv/, __pycache__/
+├── README.md
+└── CLAUDE.md                 # המסמך הזה
+```
 
 ## Conventions
 

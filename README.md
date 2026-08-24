@@ -30,7 +30,7 @@ Gemini) קורא בזמן אמת לשרת MCP ייעודי שמביא נתוני
 Agent Loop: מיושם ידנית ב-Python מול Gemini API (`google-genai`), ללא Framework חיצוני.
 
 <div dir="rtl">
-MCP Weather Server: שרת עצמאי שעוטף את Open-Meteo (חינמי, ללא API key) וחושף כלי מזג-אוויר (`get_current_uv`, `get_uv_forecast`) כ-MCP Tools סטנדרטיים. אותו שרת אפשר לחבר גם ל-Claude Desktop לבדיקה ידנית.
+MCP Weather Server: שרת עצמאי שעוטף את Open-Meteo (חינמי, ללא API key) וחושף 4 כלים כ-MCP Tools סטנדרטיים: `geocode_city` (איתור קואורדינטות לפי שם עיר), `get_current_uv`, `get_uv_forecast`, ו-`log_uv_reading` (שמירת קריאת UV ב-Supabase). אותו שרת אפשר לחבר גם ל-Claude Desktop לבדיקה ידנית.
 <div dir="rtl">
 Telegram Bot: ממשק המשתמש להתראות ולשאילתות בזמן אמת.
 
@@ -54,9 +54,11 @@ pip install -r requirements.txt
 העתיקו את `.env.example` ל-`.env` ומלאו:
 
 ```
-BOT_TOKEN=          # מ-@BotFather בטלגרם
-CHAT_ID=             # ה-chat_id שלכם (ראו הוראות ב-CLAUDE.md)
-GEMINI_API_KEY=      # מפתח חינמי מ-https://aistudio.google.com/apikey
+BOT_TOKEN=                     # מ-@BotFather בטלגרם
+CHAT_ID=                       # ה-chat_id שלכם (ראו הוראות ב-CLAUDE.md)
+GEMINI_API_KEY=                # מפתח חינמי מ-https://aistudio.google.com/apikey
+SUPABASE_URL=                  # כתובת פרויקט ה-Supabase שלכם
+SUPABASE_SERVICE_ROLE_KEY=     # מפתח service_role (לא anon) מ-Supabase
 ```
 
 הרצה:
