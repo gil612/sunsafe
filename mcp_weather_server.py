@@ -18,7 +18,7 @@ import logging
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-from supabase_client import insert_row, SupabaseError
+from supabase_client import insert_row
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sunsafe.mcp_weather_server")
@@ -131,7 +131,7 @@ async def log_uv_reading(
         inserted = insert_row("uv_readings", row)
         logger.info("log_uv_reading -> logged id=%s", inserted.get("id"))
         return {"logged": True, "id": inserted.get("id")}
-    except (SupabaseError, RuntimeError) as e:
+    except Exception as e:
         logger.warning("log_uv_reading failed: %s", e)
         return {"logged": False, "error": str(e)}
 

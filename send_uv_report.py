@@ -7,8 +7,10 @@ SunSafe — חיבור Agent Loop (דרך MCP) ל-Telegram
 MarkdownV2 שטלגרם דורש, כולל Fallback לטקסט רגיל אם ההמרה נכשלת.
 
 העיר ניתנת כארגומנט שורת-פקודה (argv); אם לא סופקה, נשתמש בברירת
-המחדל (DEFAULT_CITY). לא מספקים קואורדינטות ידנית — הסוכן עצמו אחראי
-להסיק lat/lon מתאימים לעיר לפי הידע שלו, ולקרוא לכלי get_current_uv.
+המחדל (DEFAULT_CITY). הסוכן לא מנחש קואורדינטות מ"ידע כללי" — הוא
+פונה קודם לכלי geocode_city (עם ניסיון תיקון שגיאת הקלדה אחד, במידת
+הצורך) וכל lat/lon שמגיע ל-get_current_uv מקורו אך ורק בתוצאת הכלי
+הזה. ראו את ה-docstring של build_uv_task למטה לפירוט המלא.
 
 הרצה:
     python send_uv_report.py                 # עיר ברירת המחדל
@@ -20,7 +22,7 @@ import sys
 
 from telegram_client import TelegramClient, TelegramError, escape_markdown_v2
 from mcp_agent_loop import run as run_agent_via_mcp
-from supabase_client import insert_row, SupabaseError
+from supabase_client import insert_row
 
 logger = logging.getLogger("sunsafe.integration")
 logging.basicConfig(level=logging.INFO)
@@ -62,7 +64,7 @@ def log_alert_sent(chat_id: str | int, message_text: str, parse_mode: str | None
     try:
         insert_row("alerts_sent", row)
         logger.info("Logged alert to Supabase (chat_id=%s)", chat_id)
-    except (SupabaseError, RuntimeError) as e:
+    except Exception as e:
         logger.warning("Failed to log alert to Supabase: %s", e)
 
 
@@ -123,7 +125,12 @@ def build_uv_task(city: str) -> str:
         "5. אחרי שקיבלת תוצאה תקפה מ-get_current_uv (כלומר found=True "
         "בשלב הקודם): קרא גם לכלי log_uv_reading עם query_city, "
         "resolved_city, country, lat, lon, uv_index, temperature_2m, "
-        "cloud_cover בהתאם לתוצאות שקיבלת מ-geocode_city ו-get_current_uv. "
+        f'cloud_cover. query_city חייב להיות תמיד בדיוק "{city}" — '
+        "מחרוזת הקלט המקורית של המשתמש משלב 1, ללא שינוי, גם אם "
+        "בוצע תיקון שגיאת הקלדה בשלב 2. resolved_city הוא השם שהתקבל "
+        'בפועל בשדה "name" מ-geocode_city (השם הרשמי/המתוקן). שאר '
+        "השדות (country, lat, lon, uv_index, temperature_2m, "
+        "cloud_cover) בהתאם לתוצאות שקיבלת מ-geocode_city ו-get_current_uv. "
         "זו פעולת רקע — אין להזכיר אותה או את תוצאתה בתשובה הסופית "
         "למשתמש, ואין לחכות איתה לאף החלטה נוספת."
     )
