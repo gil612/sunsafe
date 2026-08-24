@@ -20,6 +20,7 @@ import sys
 
 from telegram_client import TelegramClient, TelegramError, escape_markdown_v2
 from mcp_agent_loop import run as run_agent_via_mcp
+from supabase_client import insert_row, SupabaseError
 
 logger = logging.getLogger("sunsafe.integration")
 logging.basicConfig(level=logging.INFO)
@@ -43,6 +44,26 @@ def convert_gemini_markdown_to_telegram_v2(text: str) -> str:
         else:
             converted.append(escaped)
     return "".join(converted)
+
+
+def log_alert_sent(chat_id: str | int, message_text: str, parse_mode: str | None) -> None:
+    """
+    רושם ב-Supabase שהודעה נשלחה בפועל לטלגרם. uv_reading_id נשאר NULL
+    בהיקף הנוכחי — ראו docs/superpowers/specs/2026-08-24-supabase-uv-logging-design.md.
+    כשלון בכתיבה נרשם ללוג בלבד ולא מפיל את הריצה.
+    """
+    row = {
+        "uv_reading_id": None,
+        "chat_id": str(chat_id),
+        "message_text": message_text,
+        "parse_mode": parse_mode,
+        "status": "sent",
+    }
+    try:
+        insert_row("alerts_sent", row)
+        logger.info("Logged alert to Supabase (chat_id=%s)", chat_id)
+    except (SupabaseError, RuntimeError) as e:
+        logger.warning("Failed to log alert to Supabase: %s", e)
 
 
 def build_uv_task(city: str) -> str:
@@ -119,6 +140,7 @@ def send_agent_answer_to_telegram(
     מחזיר את הטקסט הגולמי שהוחזר מה-Agent (שימושי גם ללוגים/בדיקות).
     """
     client = client or TelegramClient()
+    target_chat_id = chat_id or client.config.default_chat_id
 
     logger.info("Running MCP agent loop for task: %s", task)
     answer = run_agent_via_mcp(task)
@@ -129,10 +151,12 @@ def send_agent_answer_to_telegram(
     try:
         client.send_text_message(formatted, chat_id=chat_id, parse_mode="MarkdownV2")
         logger.info("Sent to Telegram with MarkdownV2 formatting")
+        log_alert_sent(target_chat_id, formatted, "MarkdownV2")
     except TelegramError as e:
         logger.warning("MarkdownV2 send failed (%s) — retrying as plain text", e)
         client.send_text_message(answer, chat_id=chat_id, parse_mode=None)
         logger.info("Sent to Telegram as plain text (fallback)")
+        log_alert_sent(target_chat_id, answer, None)
 
     return answer
 
