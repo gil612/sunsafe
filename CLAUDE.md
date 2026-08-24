@@ -19,11 +19,11 @@ Fitzpatrick ושימוש בקרם הגנה), ומתריעה למשתמש בטל�
 |---|---|---|
 | שפה | Python 3.12 | סביבה וירטואלית (`venv`) |
 | AI Model | Gemini API (`google-genai`), מודל `gemini-3.5-flash-lite` | מסלול Developer API עם `GEMINI_API_KEY` — **לא** Vertex AI. נבחר כברירת המחדל של הקורס; לא דורש פרויקט GCP או billing. |
-| Agent Loop | מיושם ידנית (`agent_loop.py` / `mcp_agent_loop.py`) | ללא Framework חיצוני (לא LangChain/AutoGen) |
+| Agent Loop | מיושם ידנית (`mcp_agent_loop.py`) | ללא Framework חיצוני (לא LangChain/AutoGen) |
 | Tool Layer | MCP (Model Context Protocol), חבילת `mcp` | ראה "החלטות טכניות" למטה לגבי גרסה |
 | מקור מזג אוויר | Open-Meteo API | חינמי, ללא API key |
 | התראות | Telegram Bot API | Bot: `gil612Bot` |
-| DB (מתוכנן) | Supabase (Postgres) | טרם מומש בקוד |
+| DB | Supabase (Postgres) | פלח ראשון מומש: `uv_readings` + `alerts_sent` (לוגינג). `users`/`locations`/`exposure_log` עדיין לא מומשו |
 | Dashboard (מתוכנן) | Next.js + Tailwind | טרם מומש |
 | Hosting (מתוכנן) | Cloudflare Workers + Pages, Cloudflare Cron Triggers | טרם מומש |
 | ניהול גרסאות | Git + GitHub, `github.com/gil612/sunsafe` | ראה Conventions למטה |
@@ -33,11 +33,12 @@ Fitzpatrick ושימוש בקרם הגנה), ומתריעה למשתמש בטל�
 ```
 sunsafe/
 ├── telegram_client.py       # עטיפת Telegram Bot API: send_text_message, send_uv_alert, escape_markdown_v2
-├── agent_loop.py             # Agent Loop מול Gemini API עם Tool אחד מוגדר ידנית (get_current_uv) — גרסה ראשונית לבדיקה
-├── mcp_weather_server.py     # שרת MCP עצמאי שעוטף Open-Meteo: get_current_uv, get_uv_forecast
+├── mcp_weather_server.py     # שרת MCP עצמאי שעוטף Open-Meteo, 4 כלים: geocode_city, get_current_uv, get_uv_forecast, log_uv_reading
 ├── mcp_agent_loop.py         # גרסת ה-Agent Loop שמתחברת ל-mcp_weather_server.py כ-MCP Client (הגרסה הנוכחית/production)
-├── send_uv_report.py         # מחבר בין agent_loop לבין Telegram: מריץ שאלה, ממיר Markdown, שולח בפועל
-├── .env / .env.example       # BOT_TOKEN, CHAT_ID, GEMINI_API_KEY (הקובץ .env אף פעם לא ב-Git)
+├── send_uv_report.py         # מחבר בין mcp_agent_loop לבין Telegram: מריץ שאלה, ממיר Markdown, שולח בפועל, ורושם ל-alerts_sent
+├── supabase_client.py         # עטיפה דקה סביב Supabase REST API (PostgREST) להוספת שורות, על גבי httpx בלבד (ללא supabase-py)
+├── supabase_schema.sql        # סכמת ה-DB ב-Supabase: טבלאות uv_readings ו-alerts_sent
+├── .env / .env.example       # BOT_TOKEN, CHAT_ID, GEMINI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (הקובץ .env אף פעם לא ב-Git)
 ├── requirements.txt
 ├── .gitignore                # כולל .env, venv/, __pycache__/
 ├── README.md
@@ -87,6 +88,9 @@ sunsafe/
 - שליחת הודעות לטלגרם: ניסיון ראשון עם MarkdownV2 מפורמט; אם הפרסינג נכשל
   (למשל בגלל טקסט חופשי מה-AI) — נפילה אוטומטית לטקסט רגיל, כדי שההדגמה
   בכיתה לא תיכשל על שגיאת פורמט.
+- ולידציית עיר: `send_uv_report.py` **לא** נותן ל-Gemini לנחש קואורדינטות
+  מתוך "ידע כללי" — הסוכן מונחה לקרוא תמיד קודם ל-`geocode_city`, וכשהעיר
+  לא נמצאת (`found=False`) מוחזרת הודעת שגיאה ברורה במקום ניחוש בביטחון מלא.
 
 ### שפה בקוד
 
@@ -101,28 +105,81 @@ python -m venv venv
 venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 # מלאו .env לפי .env.example
-python mcp_agent_loop.py          # בדיקת Agent Loop + MCP
-python send_uv_report.py          # בדיקת שליחה בפועל לטלגרם
+python mcp_agent_loop.py             # בדיקת Agent Loop + MCP
+python send_uv_report.py "אילת"      # בדיקת שליחה בפועל לטלגרם, לעיר לפי בחירה
 ```
 
 ## סטטוס נוכחי
 
-✅ Telegram Bot מחובר ונבדק (`gil612Bot`)
-✅ Agent Loop מול Gemini API + Tool ראשוני (`agent_loop.py`)
-✅ MCP Weather Server + Agent Loop דרך MCP Client (`mcp_weather_server.py`,
-  `mcp_agent_loop.py`)
-✅ חיבור Agent → Telegram עם fallback לטקסט רגיל (`send_uv_report.py`)
-✅ Git עם feature branches ו-PRs מסודרים
+✅ Telegram Bot מחובר ונבדק (`gil612Bot`) <br>
+✅ Agent Loop מול Gemini API, דרך MCP Client בלבד (`mcp_agent_loop.py`) —
+  הגרסה הישנה עם Tool מוגדר ידנית (`agent_loop.py`) הוסרה לגמרי מהריפו<br>
+✅ MCP Weather Server עם 3 כלים: `geocode_city`, `get_current_uv`,
+  `get_uv_forecast`<br>
+✅ חיבור Agent → Telegram עם fallback לטקסט רגיל, כולל הדגשת bold על
+  מספר ה-UV והסיווג (`send_uv_report.py`)<br>
+✅ עיר כפרמטר argv (`python send_uv_report.py "<עיר>"`) — עם ולידציה
+  אמיתית מול Open-Meteo Geocoding (לא ניחוש lat/lon), כולל טיפול בשגיאות
+  הקלדה/עיר לא מוכרת עם הודעת שגיאה ברורה במקום ניחוש<br>
+✅ Git עם feature branches ו-PRs מסודרים; docstrings תורגמו לאנגלית<br>
+✅ Supabase logging חי לשתי הטבלאות הראשונות: `uv_readings` (נכתב על-ידי
+  הסוכן עצמו, דרך כלי ה-MCP `log_uv_reading`, מיד אחרי `get_current_uv`)
+  ו-`alerts_sent` (נכתב מקוד חיצוני ב-`send_uv_report.py`, אחרי כל שליחה
+  אמיתית לטלגרם — גם בהצלחה וגם בנתיב "עיר לא זוהתה"). נבדק קצה-לקצה:
+  נתיב הצלחה כותב לשתי הטבלאות, נתיב "עיר לא זוהתה" כותב רק ל-`alerts_sent`
+  (`uv_reading_id` נשאר NULL) בלי לגעת ב-`uv_readings`
 
 ## TODO (לפי סדר עדיפות)
 
-1. חיבור `send_uv_report.py` לגרסת ה-MCP (`mcp_agent_loop`) במקום
-   `agent_loop` הישן
-2. `exposure_score` — נוסחה שמשלבת UV Index, זמן שהייה, סוג עור (Fitzpatrick)
-   ושימוש בקרם הגנה (כולל SPF ותפוגת תוקף) למדד חשיפה יחיד 0-100+
-3. מודל נתונים ב-Supabase: `users`, `locations`, `uv_readings`,
-   `exposure_log`, `alerts_sent`
-4. Dashboard ב-Next.js: היסטוריה, גרפים, הגדרות פרופיל (סוג עור, מיקום)
-5. Deploy לפרודקשן (Cloudflare Workers/Pages) + Cloudflare Cron Triggers
-   לתזמון אוטומטי
-6. חישוב עלות מדויק ל-100 בקשות/יום
+1. שני Tools נוספים לשרת ה-MCP, כדי להגיע ל-5 הנדרשים בקורס
+   (כרגע יש 3: geocode_city, get_current_uv, get_uv_forecast):
+   - calculate_exposure_score(uv, duration_minutes, skin_type, spf) —
+     מימוש בקוד production של נוסחת ה-exposure_score (כרגע קיימת רק
+     כ-JS בדף ההדגמה, לא ב-backend האמיתי)
+   - send_telegram_report(message) — ה-Tool האחרון שהסוכן עצמו קורא לו
+     כפעולה מסיימת בתוך ה-Agent Loop (ולא, כמו היום, קוד חיצוני
+     ב-send_uv_report.py ששולח *אחרי* שהלולאה כבר הסתיימה) —
+     דרישת קורס מפורשת
+
+2. Error handling: שגיאה נשלחת לטלגרם אם הסוכן נכשל — כרגע אם
+   max_iterations נחרג (RuntimeError) או קורה Exception אחר בהרצת
+   ה-Agent, שום דבר לא נתפס ולא נשלח למשתמש. יש לעטוף את
+   run_agent_via_mcp(task) ב-try/except ולשלוח התראת שגיאה בפועל
+
+3. Logging עם timestamp אמיתי — logging.basicConfig(level=logging.INFO)
+   לא כולל timestamp בפורמט ברירת המחדל. להוסיף
+   format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+4. Cost Tracking — לספור Tokens מכל תשובה של Gemini (usage_metadata),
+   לחשב עלות לפי תמחור gemini-3.5-flash-lite, ולצרף/לשלוח בסוף כל
+   ריצה (כולל בהודעת הטלגרם עצמה)
+
+5. בניית זרימת שיחה מלאה לבוט הטלגרם (conversation flow) — כרגע כל
+   הרצה היא שאילתת עיר בודדת חד-פעמית, לא שיחה רב-שלבית עם המשתמש
+   [ממפגישת מעקב 20.08.2026 עם שון גרייס]
+
+6. מודל נתונים ב-Supabase — פלח ראשון **בוצע**: `uv_readings` ו-`alerts_sent`
+   קיימות וחיות (ראו "סטטוס נוכחי" למעלה). נותרו: `users`, `locations`,
+   `exposure_log` — אלה תלויות בנוסחת ה-exposure_score (calculate_exposure_score,
+   סעיף 1 למעלה) שעדיין לא מומשה, ולכן ממתינות לה
+
+7. Dashboard ב-Next.js: היסטוריה, גרפים, הגדרות פרופיל (סוג עור, מיקום)
+
+8. Deploy לפרודקשן (Cloudflare Workers/Pages) + Cloudflare Cron Trigger
+   מוגדר ב-wrangler.toml, בזמן ישראל — דרישת קורס מפורשת
+
+9. חישוב עלות מדויק ל-100 בקשות/יום — שונה מ-Cost Tracking בסעיף 4:
+   זו תחזית ברמת production (100 בקשות ביום), לא מדידה בפועל בריצה בודדת
+
+## החלטות פתוחות (טרם הוכרעו — לא TODO טכני)
+
+- האם להוסיף תכונת אבחון מצב עור לאחר חשיפה לשמש? — נדון כרעיון בפגישה,
+  טרם הוחלט [ממפגישת מעקב 20.08.2026]
+- מהו טווח ה-dashboard: למשתמש קצה, לניהול, או שניהם?
+  [ממפגישת מעקב 20.08.2026]
+
+## לפני ההדגמה בכיתה
+
+- לאחר שסעיפים 1-4 יושמו — לבדוק שוב את כל השטף חי מקצה לקצה
+  (הסוכן קורא ל-5 הכלים כנדרש, כולל שליחה עצמאית לטלגרם + cost report),
+  כי הארכיטקטורה תשתנה משמעותית לעומת מה שנבדק היום

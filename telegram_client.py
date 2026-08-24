@@ -15,7 +15,7 @@ Run as a standalone check:
 import os
 import re
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from dotenv import load_dotenv
@@ -38,7 +38,7 @@ class TelegramError(Exception):
 
 @dataclass
 class TelegramConfig:
-    bot_token: str
+    bot_token: str = field(repr=False)
     default_chat_id: str | None = None
 
     @classmethod
