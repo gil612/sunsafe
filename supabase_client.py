@@ -63,15 +63,17 @@ def insert_row(table: str, row: dict, config: "SupabaseConfig | None" = None) ->
     try:
         response = httpx.post(url, headers=headers, json=row, timeout=10.0)
         response.raise_for_status()
+        inserted = response.json()
+        return inserted[0] if isinstance(inserted, list) else inserted
     except httpx.HTTPStatusError as e:
         logger.error("Supabase insert into %s failed (%s): %s", table, e.response.status_code, e.response.text)
         raise SupabaseError(f"הוספת שורה ל-{table} נכשלה: {e.response.text}") from e
     except httpx.RequestError as e:
         logger.error("Supabase request to %s failed: %s", table, e)
         raise SupabaseError(f"בקשת רשת ל-Supabase נכשלה: {e}") from e
-
-    inserted = response.json()
-    return inserted[0] if isinstance(inserted, list) else inserted
+    except (ValueError, KeyError, IndexError) as e:
+        logger.error("Supabase response parsing failed for %s: %s", table, e)
+        raise SupabaseError(f"פענוח התגובה מ-Supabase נכשל: {e}") from e
 
 
 if __name__ == "__main__":
