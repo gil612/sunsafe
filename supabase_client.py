@@ -14,7 +14,7 @@ Run as a standalone check:
 
 import os
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 from dotenv import load_dotenv
@@ -32,7 +32,7 @@ class SupabaseError(Exception):
 @dataclass
 class SupabaseConfig:
     url: str
-    service_role_key: str
+    service_role_key: str = field(repr=False)
 
     @classmethod
     def from_env(cls) -> "SupabaseConfig":
@@ -53,7 +53,7 @@ def insert_row(table: str, row: dict, config: "SupabaseConfig | None" = None) ->
     logging failure break the main flow should catch this explicitly.
     """
     config = config or SupabaseConfig.from_env()
-    url = f"{config.url}/rest/v1/{table}"
+    url = f"{config.url.rstrip('/')}/rest/v1/{table}"
     headers = {
         "apikey": config.service_role_key,
         "Authorization": f"Bearer {config.service_role_key}",

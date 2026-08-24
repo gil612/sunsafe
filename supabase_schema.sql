@@ -24,3 +24,9 @@ create table if not exists alerts_sent (
     parse_mode    text,
     status        text not null
 );
+
+alter table uv_readings enable row level security;
+alter table alerts_sent enable row level security;
+
+alter table alerts_sent add constraint alerts_sent_status_check
+    check (status in ('sent', 'failed'));
