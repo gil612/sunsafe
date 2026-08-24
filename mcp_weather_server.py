@@ -18,6 +18,8 @@ import logging
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+from supabase_client import insert_row, SupabaseError
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sunsafe.mcp_weather_server")
 
@@ -89,6 +91,49 @@ async def get_current_uv(lat: float, lon: float) -> dict:
         )
         response.raise_for_status()
         return response.json()["current"]
+
+
+@mcp.tool()
+async def log_uv_reading(
+    query_city: str,
+    resolved_city: str,
+    country: str | None,
+    lat: float,
+    lon: float,
+    uv_index: float,
+    temperature_2m: float | None = None,
+    cloud_cover: int | None = None,
+) -> dict:
+    """
+    שומר קריאת UV שבוצעה בפועל בטבלת uv_readings ב-Supabase, לצורך
+    היסטוריה עתידית (Dashboard). יש לקרוא לכלי הזה תמיד אחרי
+    get_current_uv כאשר יש תוצאה תקפה לדווח עליה.
+
+    כשלון בשמירה (בעיית רשת/הרשאות מול Supabase) לא אמור לעצור את
+    התשובה למשתמש — הכלי מחזיר {"logged": False, "error": ...}
+    במקום לזרוק חריגה.
+    """
+    logger.info(
+        "log_uv_reading(query_city=%s, resolved_city=%s, uv_index=%s)",
+        query_city, resolved_city, uv_index,
+    )
+    row = {
+        "query_city": query_city,
+        "resolved_city": resolved_city,
+        "country": country,
+        "lat": lat,
+        "lon": lon,
+        "uv_index": uv_index,
+        "temperature_2m": temperature_2m,
+        "cloud_cover": cloud_cover,
+    }
+    try:
+        inserted = insert_row("uv_readings", row)
+        logger.info("log_uv_reading -> logged id=%s", inserted.get("id"))
+        return {"logged": True, "id": inserted.get("id")}
+    except (SupabaseError, RuntimeError) as e:
+        logger.warning("log_uv_reading failed: %s", e)
+        return {"logged": False, "error": str(e)}
 
 
 @mcp.tool()
