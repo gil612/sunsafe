@@ -30,3 +30,46 @@ alter table alerts_sent enable row level security;
 
 alter table alerts_sent add constraint alerts_sent_status_check
     check (status in ('sent', 'failed'));
+
+
+-- SunSafe — Supabase schema (second slice: personal area — users,
+-- exposure_log, magic_links)
+-- See docs/2026-08-25-exposure-log-schema-design.md for rationale.
+
+create table if not exists users (
+    telegram_username text primary key,
+    skin_type          smallint not null check (skin_type between 1 and 6),
+    created_at          timestamptz not null default now(),
+    chat_id             bigint  -- לשליחת דוחות יזומים (send_uv_report.py --broadcast); NULL עד ההודעה הראשונה מהמשתמש. ראו docs/2026-08-26-multi-user-broadcast-design.md
+);
+
+-- הרצה חד-פעמית נוספת אם הטבלה כבר קיימת מלפני העדכון הזה:
+-- alter table users add column if not exists chat_id bigint;
+
+create table if not exists exposure_log (
+    id                bigint generated always as identity primary key,
+    created_at        timestamptz not null default now(),
+    telegram_username text not null references users(telegram_username),
+    city              text not null,
+    country           text,
+    start_time        timestamptz not null,
+    end_time          timestamptz,        -- NULL = session פתוח כרגע
+    uv_index          double precision not null,
+    spf               integer,            -- NULL = לא נעשה שימוש בקרם הגנה
+    exposure_score    integer             -- NULL עד שה-session נסגר
+);
+
+create table if not exists magic_links (
+    token              text primary key,
+    telegram_username  text not null,
+    expires_at         timestamptz not null,
+    used               boolean not null default false,
+    created_at         timestamptz not null default now()
+);
+
+alter table users enable row level security;
+alter table exposure_log enable row level security;
+alter table magic_links enable row level security;
+-- שלוש הטבלאות האלה בלי אף policy בכוונה — גישה רק דרך service_role
+-- (הבוט כותב/מעדכן, ה-Edge Function של ה-Magic Link קוראת). דפדפן עם
+-- anon key לא יכול לגעת בהן ישירות בשום מצב.

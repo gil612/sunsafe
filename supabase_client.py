@@ -75,6 +75,86 @@ def insert_row(table: str, row: dict, config: "SupabaseConfig | None" = None) ->
         logger.error("Supabase response parsing failed for %s: %s", table, e)
         raise SupabaseError(f"פענוח התגובה מ-Supabase נכשל: {e}") from e
 
+def select_rows(table: str, params: dict, config: "SupabaseConfig | None" = None) -> list:
+    """
+    Select rows from a Supabase table via PostgREST filters, e.g.
+    select_rows("exposure_log", {"telegram_username": "eq.gil612",
+                                  "end_time": "is.null"})
+    Returns a list of matching rows (empty list if none match).
+    """
+    config = config or SupabaseConfig.from_env()
+    url = f"{config.url.rstrip('/')}/rest/v1/{table}"
+    headers = {
+        "apikey": config.service_role_key,
+        "Authorization": f"Bearer {config.service_role_key}",
+    }
+    try:
+        response = httpx.get(url, headers=headers, params=params, timeout=10.0)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error("Supabase select from %s failed (%s): %s", table, e.response.status_code, e.response.text)
+        raise SupabaseError(f"שליפת נתונים מ-{table} נכשלה: {e.response.text}") from e
+    except httpx.RequestError as e:
+        logger.error("Supabase request to %s failed: %s", table, e)
+        raise SupabaseError(f"בקשת רשת ל-Supabase נכשלה: {e}") from e
+
+
+def update_rows(table: str, params: dict, patch: dict, config: "SupabaseConfig | None" = None) -> list:
+    """
+    Update rows matching PostgREST filters with the given patch dict,
+    e.g. update_rows("exposure_log", {"id": "eq.42"},
+                      {"end_time": "...", "exposure_score": 90})
+    Returns the updated rows (as PostgREST returns them).
+    """
+    config = config or SupabaseConfig.from_env()
+    url = f"{config.url.rstrip('/')}/rest/v1/{table}"
+    headers = {
+        "apikey": config.service_role_key,
+        "Authorization": f"Bearer {config.service_role_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+    try:
+        response = httpx.patch(url, headers=headers, params=params, json=patch, timeout=10.0)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error("Supabase update on %s failed (%s): %s", table, e.response.status_code, e.response.text)
+        raise SupabaseError(f"עדכון שורה ב-{table} נכשל: {e.response.text}") from e
+    except httpx.RequestError as e:
+        logger.error("Supabase request to %s failed: %s", table, e)
+        raise SupabaseError(f"בקשת רשת ל-Supabase נכשלה: {e}") from e
+
+
+def upsert_row(table: str, row: dict, on_conflict: str, config: "SupabaseConfig | None" = None) -> dict:
+    """
+    Insert a row, or update it in place if a row with the same
+    `on_conflict` column already exists (e.g. upsert_row("users",
+    {"telegram_username": "gil612", "skin_type": 3}, on_conflict="telegram_username")).
+    """
+    config = config or SupabaseConfig.from_env()
+    url = f"{config.url.rstrip('/')}/rest/v1/{table}"
+    headers = {
+        "apikey": config.service_role_key,
+        "Authorization": f"Bearer {config.service_role_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=representation",
+    }
+    try:
+        response = httpx.post(
+            url, headers=headers, params={"on_conflict": on_conflict}, json=row, timeout=10.0
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result[0] if isinstance(result, list) else result
+    except httpx.HTTPStatusError as e:
+        logger.error("Supabase upsert into %s failed (%s): %s", table, e.response.status_code, e.response.text)
+        raise SupabaseError(f"שמירת שורה ב-{table} נכשלה: {e.response.text}") from e
+    except httpx.RequestError as e:
+        logger.error("Supabase request to %s failed: %s", table, e)
+        raise SupabaseError(f"בקשת רשת ל-Supabase נכשלה: {e}") from e
+
 
 if __name__ == "__main__":
     # בדיקה עצמאית מהירה — מריצים "python supabase_client.py"
