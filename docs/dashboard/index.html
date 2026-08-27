@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SunSafe — הדגמת שימוש</title>
+<title>SunSafe — האזור האישי שלי</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   .viz-root {
@@ -72,38 +72,12 @@
   .login-emoji { font-size: 40px; margin-bottom: 8px; }
   .login-card h1 { font-size: 22px; margin: 0 0 4px 0; }
   .login-card p.tagline { color: var(--text-secondary); font-size: 14px; margin: 0 0 28px 0; }
-  .login-card label {
-    display: block; text-align: right; font-size: 13px;
-    color: var(--text-secondary); margin-bottom: 6px;
+  .status-spinner {
+    width: 28px; height: 28px; margin: 4px auto 4px;
+    border: 3px solid var(--border); border-top-color: var(--series-blue);
+    border-radius: 50%; animation: spin 0.8s linear infinite;
   }
-  .tg-input-wrap {
-    display: flex; align-items: center; gap: 6px;
-    border: 1px solid var(--border); border-radius: 10px;
-    padding: 10px 12px; background: var(--page);
-  }
-  .tg-input-wrap span { color: var(--text-muted); font-size: 15px; }
-  #username-input {
-    border: none; outline: none; background: transparent;
-    font-size: 15px; color: var(--text-primary); width: 100%;
-    font-family: inherit; direction: ltr; text-align: right;
-  }
-  #login-btn {
-    width: 100%; margin-top: 18px; padding: 11px;
-    border: none; border-radius: 10px;
-    background: var(--series-blue); color: #fff;
-    font-size: 15px; font-weight: 600; cursor: pointer;
-    font-family: inherit;
-  }
-  #login-btn:hover { opacity: 0.92; }
-  #login-error {
-    margin-top: 12px; font-size: 13px; color: var(--status-critical);
-    min-height: 16px;
-  }
-  .demo-hint {
-    margin-top: 22px; font-size: 12px; color: var(--text-muted);
-    border-top: 1px solid var(--gridline); padding-top: 16px;
-  }
-  .demo-hint b { color: var(--text-secondary); }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ---------- Dashboard ---------- */
   #dashboard { display: none; max-width: 880px; margin: 0 auto; padding: 24px 20px 60px; }
@@ -120,12 +94,6 @@
   }
   .who .name { font-weight: 600; font-size: 15px; }
   .who .sub { font-size: 12px; color: var(--text-muted); }
-  #logout-btn {
-    border: 1px solid var(--border); background: var(--surface-1);
-    color: var(--text-secondary); font-size: 13px; padding: 7px 14px;
-    border-radius: 8px; cursor: pointer; font-family: inherit;
-  }
-  #logout-btn:hover { color: var(--text-primary); }
 
   .card-head-row {
     display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
@@ -237,24 +205,12 @@
 </head>
 <body>
 
-<!-- ============== LOGIN SCREEN ============== -->
+<!-- ============== STATUS SCREEN (loading / error / not onboarded) ============== -->
 <div id="login-screen" class="viz-root">
   <div class="login-card">
-    <div class="login-emoji">☀️</div>
-    <h1>SunSafe</h1>
-    <p class="tagline">מד חשיפה לשמש חכם</p>
-
-    <label for="username-input">שם משתמש בטלגרם</label>
-    <div class="tg-input-wrap">
-      <span>@</span>
-      <input id="username-input" type="text" placeholder="gil612" autocomplete="off" />
-    </div>
-    <button id="login-btn">כניסה</button>
-    <div id="login-error"></div>
-
-    <div class="demo-hint">
-      גרסת הדגמה — משתמשים זמינים: <b>@gil612</b>, <b>@dana_k</b>, <b>@yossi_l</b>
-    </div>
+    <div class="login-emoji" id="status-emoji">☀️</div>
+    <h1 id="status-title">SunSafe</h1>
+    <p class="tagline" id="status-message">מד חשיפה לשמש חכם</p>
   </div>
 </div>
 
@@ -268,7 +224,6 @@
         <div class="sub" id="display-sub">—</div>
       </div>
     </div>
-    <button id="logout-btn">התנתקות</button>
   </div>
 
   <div class="card">
@@ -318,7 +273,7 @@
     </div>
   </div>
 
-  <footer class="note">SunSafe · גרסת הדגמה עם נתונים לדוגמה — לא מחובר ל-Backend אמיתי</footer>
+  <footer class="note">SunSafe · האזור האישי שלך — הקישור בתוקף ל-24 שעות מרגע היצירה</footer>
 </div>
 
 <script>
@@ -326,43 +281,29 @@
   "use strict";
 
   // ---------------------------------------------------------------
-  // Mock data — עד שיש Backend/Supabase אמיתי, זה משמש להדגמת ה-UI
+  // חיבור אמיתי ל-Backend: Supabase Edge Function "dashboard-data".
+  // הדף קורא את ה-Magic Link Token מה-URL (?token=...), לא מבקש שם
+  // משתמש בכלל — הטוקן עצמו הוא מנגנון האימות (ראו
+  // docs/2026-08-25-magic-link-edge-function-design.md).
   // ---------------------------------------------------------------
-  const SKIN_TYPE_FACTOR = { 1: 0.5, 2: 0.75, 3: 1.0, 4: 1.5, 5: 2.5, 6: 4.0 };
+  const DASHBOARD_FUNCTION_URL =
+    "https://wccueensecchmqfwdecw.supabase.co/functions/v1/dashboard-data";
 
-  const USERS = {
-    "gil612": {
-      name: "Gil Baram",
-      skinType: 3,
-      sessions: [
-        { date: "2026-08-19", city: "תל אביב", country: "ישראל", start: "09:00", end: "09:30", uv: 7.4, spf: 50 },
-        { date: "2026-08-18", city: "תל אביב", country: "ישראל", start: "10:00", end: "10:45", uv: 6.15, spf: null },
-        { date: "2026-08-17", city: "תל אביב", country: "ישראל", start: "08:30", end: "09:00", uv: 4.1, spf: null },
-        { date: "2026-08-17", city: "תל אביב", country: "ישראל", start: "12:00", end: "12:45", uv: 7.5, spf: 30 },
-      ],
-    },
-    "dana_k": {
-      name: "Dana Cohen",
-      skinType: 2,
-      sessions: [
-        { date: "2026-08-18", city: "חיפה", country: "ישראל", start: "07:30", end: "08:15", uv: 3.2, spf: null },
-        { date: "2026-08-18", city: "חיפה", country: "ישראל", start: "13:00", end: "14:30", uv: 8.1, spf: null },
-      ],
-    },
-    "yossi_l": {
-      name: "Yossi Levi",
-      skinType: 4,
-      sessions: [
-        { date: "2026-08-19", city: "דובאי", country: "איחוד האמירויות", start: "10:30", end: "12:00", uv: 7.55, spf: 30 },
-      ],
-    },
-  };
+  const SKIN_TYPE_FACTOR = { 1: 0.5, 2: 0.75, 3: 1.0, 4: 1.5, 5: 2.5, 6: 4.0 };
 
   const STATUS = {
     good:     { color: "var(--status-good)",     label: "נמוך" },
     warning:  { color: "var(--status-warning)",  label: "בינוני" },
     serious:  { color: "var(--status-serious)",  label: "בינוני-גבוה" },
     critical: { color: "var(--status-critical)", label: "גבוה / חריגה" },
+  };
+
+  // הודעות שגיאה בעברית לפי error code — ראו טבלת השגיאות במסמך העיצוב.
+  const ERROR_MESSAGES = {
+    missing_token: "לא נמצא טוקן בקישור. שלחו /dashboard לבוט כדי לקבל קישור חדש.",
+    invalid_token: "הקישור הזה לא תקין. שלחו /dashboard לבוט כדי לקבל קישור חדש.",
+    expired_token: "פג תוקף הקישור (בתוקף ל-24 שעות בלבד). שלחו /dashboard לבוט כדי לקבל קישור חדש.",
+    server_error: "אירעה שגיאה בטעינת הנתונים. נסו שוב בעוד רגע.",
   };
 
   let currentUser = null;
@@ -398,35 +339,107 @@
   }
 
   // ---------------------------------------------------------------
-  // Login
+  // טעינת הנתונים האמיתיים מה-Edge Function, לפי הטוקן שב-URL
   // ---------------------------------------------------------------
-  const usernameInput = document.getElementById("username-input");
-  const loginBtn = document.getElementById("login-btn");
-  const loginError = document.getElementById("login-error");
-
-  function tryLogin() {
-    const raw = usernameInput.value.trim().replace(/^@/, "");
-    const user = USERS[raw];
-    if (!user) {
-      loginError.textContent = "משתמש לא נמצא. נסו: gil612, dana_k, yossi_l";
-      return;
-    }
-    loginError.textContent = "";
-    currentUser = { username: raw, ...user };
-    showDashboard();
+  function showStatus(emoji, title, message) {
+    document.getElementById("status-emoji").textContent = emoji;
+    document.getElementById("status-title").textContent = title;
+    document.getElementById("status-message").textContent = message;
+    document.getElementById("login-screen").style.display = "flex";
+    document.getElementById("dashboard").style.display = "none";
   }
 
-  loginBtn.addEventListener("click", tryLogin);
-  usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") tryLogin(); });
+  function isoToLocalDateStr(iso) {
+    const d = new Date(iso);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
 
-  document.getElementById("logout-btn").addEventListener("click", () => {
-    currentUser = null;
-    currentDate = null;
-    usernameInput.value = "";
-    loginError.textContent = "";
-    document.getElementById("dashboard").style.display = "none";
-    document.getElementById("login-screen").style.display = "flex";
-  });
+  function isoToLocalTimeStr(iso) {
+    const d = new Date(iso);
+    const h = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    return `${h}:${mi}`;
+  }
+
+  // מדד חשיפה: מעדיפים את המספר שכבר חושב ונשמר בשרת (exposure_score
+  // ב-exposure_log, מחושב כש-session נסגר) — ורק אם משום מה חסר,
+  // נופלים בחזרה לחישוב מקומי (exposureScore) כגיבוי הגנתי בלבד.
+  function scoreOf(session) {
+    return session.serverScore != null
+      ? session.serverScore
+      : exposureScore(session, currentUser.skinType);
+  }
+
+  async function loadDashboard() {
+    const token = new URLSearchParams(window.location.search).get("token");
+    if (!token) {
+      showStatus("🔗", "אין טוקן", ERROR_MESSAGES.missing_token);
+      return;
+    }
+
+    showStatus("⏳", "טוען...", "רגע, שולפים את הנתונים שלך...");
+    document.getElementById("status-emoji").innerHTML = '<div class="status-spinner"></div>';
+
+    let response;
+    try {
+      response = await fetch(`${DASHBOARD_FUNCTION_URL}?token=${encodeURIComponent(token)}`);
+    } catch (err) {
+      showStatus("⚠️", "שגיאת רשת", "לא הצלחנו להתחבר לשרת. בדקו את החיבור לאינטרנט ונסו לרענן.");
+      return;
+    }
+
+    let body;
+    try {
+      body = await response.json();
+    } catch (err) {
+      showStatus("⚠️", "שגיאה", "תשובה לא תקינה מהשרת.");
+      return;
+    }
+
+    if (!response.ok) {
+      const message = ERROR_MESSAGES[body && body.error] || "אירעה שגיאה לא צפויה.";
+      showStatus("⚠️", "שגיאה", message);
+      return;
+    }
+
+    if (!body.onboarded) {
+      showStatus(
+        "👋",
+        "עוד לא הגדרת סוג עור",
+        "שלחו /set_skin_type לבוט כדי להתחיל, ואז רעננו את הדף הזה."
+      );
+      return;
+    }
+
+    currentUser = {
+      username: body.telegram_username,
+      skinType: body.skin_type,
+      sessions: body.sessions.map((s) => ({
+        date: isoToLocalDateStr(s.start_time),
+        city: s.city,
+        country: s.country || "",
+        start: isoToLocalTimeStr(s.start_time),
+        end: isoToLocalTimeStr(s.end_time),
+        uv: s.uv_index,
+        spf: s.spf,
+        serverScore: s.exposure_score,
+      })),
+    };
+
+    if (currentUser.sessions.length === 0) {
+      showStatus(
+        "📋",
+        "עדיין אין נתונים",
+        "לא נמצאו Sessions סגורים. שלחו /start_session לבוט כדי להתחיל למדוד חשיפה."
+      );
+      return;
+    }
+
+    showDashboard();
+  }
 
   // ---------------------------------------------------------------
   // Excel export — כל ה-Sessions של המשתמש (כל התאריכים), כולל מדד החשיפה
@@ -443,7 +456,7 @@
 
     const sorted = [...currentUser.sessions].sort((a, b) => a.date < b.date ? 1 : -1);
     const rows = sorted.map(s => {
-      const score = exposureScore(s, currentUser.skinType);
+      const score = scoreOf(s);
       const status = scoreToStatus(score);
       return [
         formatDate(s.date),
@@ -504,10 +517,9 @@
     document.getElementById("login-screen").style.display = "none";
     document.getElementById("dashboard").style.display = "block";
 
-    document.getElementById("avatar-initial").textContent = currentUser.name.charAt(0);
-    document.getElementById("display-name").textContent = currentUser.name;
-    document.getElementById("display-sub").textContent =
-      "@" + currentUser.username + " · סוג עור " + toRoman(currentUser.skinType);
+    document.getElementById("avatar-initial").textContent = currentUser.username.charAt(0).toUpperCase();
+    document.getElementById("display-name").textContent = "@" + currentUser.username;
+    document.getElementById("display-sub").textContent = "סוג עור " + toRoman(currentUser.skinType);
 
     const dates = [...new Set(currentUser.sessions.map(s => s.date))].sort().reverse();
     currentDate = dates[0];
@@ -568,7 +580,7 @@
 
     const totalMinutes = sessions.reduce((sum, s) => sum + durationMinutes(s.start, s.end), 0);
     const avgUv = sessions.reduce((sum, s) => sum + s.uv, 0) / sessions.length;
-    const scores = sessions.map(s => exposureScore(s, currentUser.skinType));
+    const scores = sessions.map(s => scoreOf(s));
     const dayScore = Math.max(...scores);
     const dayStatus = scoreToStatus(dayScore);
 
@@ -650,6 +662,8 @@
     }
     return msg;
   }
+
+  loadDashboard();
 })();
 </script>
 </body>

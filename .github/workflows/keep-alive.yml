@@ -20,6 +20,6 @@ jobs:
     steps:
       - name: Ping HF Space to prevent sleep
         run: |
-          curl -sf --max-time 20 "https://YOUR-HF-USERNAME-YOUR-SPACE-NAME.hf.space" \
+          curl -sf --max-time 20 "https://gil612-sunsafe-bot.hf.space" \
             && echo "Ping OK" \
             || echo "Ping failed (Space may be cold-starting — not necessarily an error)"
