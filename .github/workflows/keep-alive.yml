@@ -1,0 +1,25 @@
+name: Keep HF Space Alive
+
+# מפינג'ת את ה-Space כל 10 דקות כדי שלא יירדם (Hugging Face Spaces
+# חינמיים נרדמים אחרי חוסר-פעילות ב-HTTP הנכנס — ראו
+# docs/2026-08-27-hf-spaces-hosting-design.md). זה HTTP GET רגיל בלבד,
+# לא מריץ שום קוד פרויקט.
+#
+# ***חשוב***: יש להחליף את ה-URL למטה בכתובת ה-Space האמיתית שלך אחרי
+# שיצרת אותו (Settings של ה-Space -> "Embed this Space" מראה את ה-URL,
+# בפורמט https://<hf-username>-<space-name>.hf.space).
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}  # מאפשר גם הפעלה ידנית מטאב Actions, לבדיקה
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping HF Space to prevent sleep
+        run: |
+          curl -sf --max-time 20 "https://YOUR-HF-USERNAME-YOUR-SPACE-NAME.hf.space" \
+            && echo "Ping OK" \
+            || echo "Ping failed (Space may be cold-starting — not necessarily an error)"
