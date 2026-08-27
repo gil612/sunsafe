@@ -39,8 +39,12 @@ alter table alerts_sent add constraint alerts_sent_status_check
 create table if not exists users (
     telegram_username text primary key,
     skin_type          smallint not null check (skin_type between 1 and 6),
-    created_at          timestamptz not null default now()
+    created_at          timestamptz not null default now(),
+    chat_id             bigint  -- לשליחת דוחות יזומים (send_uv_report.py --broadcast); NULL עד ההודעה הראשונה מהמשתמש. ראו docs/2026-08-26-multi-user-broadcast-design.md
 );
+
+-- הרצה חד-פעמית נוספת אם הטבלה כבר קיימת מלפני העדכון הזה:
+-- alter table users add column if not exists chat_id bigint;
 
 create table if not exists exposure_log (
     id                bigint generated always as identity primary key,
