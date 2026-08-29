@@ -279,6 +279,23 @@ def handle_dashboard(chat_id: int, username: str) -> None:
 # (ראו docs/2026-08-29-offline-session-miniapp-design.md).
 # ---------------------------------------------------------------------
 def handle_offline_session(chat_id: int, username: str, args: str) -> None:
+    # web_app buttons חייבים HTTPS — טלגרם דוחה כל URL אחר עם 400 Bad
+    # Request על ה-sendMessage עצמו (לפני שההודעה בכלל נשלחת). בלי הבדיקה
+    # הזו, אם SESSION_MINIAPP_URL לא הוגדר (עדיין על ברירת המחדל
+    # http://localhost), הבקשה הייתה נכשלת עם exception לא מטופל וממש
+    # שום דבר לא קורה אצל המשתמש — בדיוק המצב שקרה כאן.
+    if not SESSION_MINIAPP_URL.startswith("https://"):
+        send_message(
+            chat_id,
+            "התכונה הזו עוד לא מוגדרת אצל מפעיל הבוט (SESSION_MINIAPP_URL "
+            "חסר/לא HTTPS). נסו שוב מאוחר יותר.",
+        )
+        logger.warning(
+            "SESSION_MINIAPP_URL is not HTTPS (%r) — refusing to send web_app button to @%s",
+            SESSION_MINIAPP_URL, username,
+        )
+        return
+
     send_message(
         chat_id,
         "תיעוד session בלי קליטה — פתחו את זה עכשיו, כשיש לכם אינטרנט, "
