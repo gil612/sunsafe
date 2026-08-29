@@ -39,6 +39,10 @@ logging.basicConfig(
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DASHBOARD_BASE_URL = os.environ.get("DASHBOARD_BASE_URL", "http://localhost:8080")
+# ה-Mini App לתיעוד session אופליין (docs/session/index.html). ברירת
+# מחדל localhost כדי לא לשבור בדיקות מקומיות, בדיוק כמו DASHBOARD_BASE_URL.
+# ראו docs/2026-08-29-offline-session-miniapp-design.md.
+SESSION_MINIAPP_URL = os.environ.get("SESSION_MINIAPP_URL", "http://localhost:8080/session")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
@@ -269,6 +273,26 @@ def handle_dashboard(chat_id: int, username: str) -> None:
 
 
 # ---------------------------------------------------------------------
+# /offline_session — פותח את ה-Mini App לתיעוד session בלי קליטה
+# (docs/session/index.html). כפתור web_app, לא קישור רגיל: מריץ את
+# הדף בתוך ה-WebView של טלגרם, מה שנותן לו את initData לזיהוי המשתמש
+# (ראו docs/2026-08-29-offline-session-miniapp-design.md).
+# ---------------------------------------------------------------------
+def handle_offline_session(chat_id: int, username: str, args: str) -> None:
+    send_message(
+        chat_id,
+        "תיעוד session בלי קליטה — פתחו את זה עכשיו, כשיש לכם אינטרנט, "
+        "כדי שהעמוד יישמר במכשיר וימשיך לעבוד גם בלי חיבור:",
+        reply_markup={
+            "inline_keyboard": [[
+                {"text": "☀️ פתיחת SunSafe אופליין", "web_app": {"url": SESSION_MINIAPP_URL}},
+            ]],
+        },
+    )
+    logger.info("Sent offline-session Mini App link to @%s", username)
+
+
+# ---------------------------------------------------------------------
 # /set_skin_type <1-6>
 # ---------------------------------------------------------------------
 def handle_set_skin_type(chat_id: int, username: str, args: str) -> None:
@@ -443,6 +467,7 @@ COMMAND_HANDLERS = {
     "/set_skin_type": handle_set_skin_type,
     "/start_session": handle_start_session,
     "/end_session": handle_end_session,
+    "/offline_session": handle_offline_session,
 }
 
 

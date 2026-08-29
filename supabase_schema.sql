@@ -73,3 +73,26 @@ alter table magic_links enable row level security;
 -- שלוש הטבלאות האלה בלי אף policy בכוונה — גישה רק דרך service_role
 -- (הבוט כותב/מעדכן, ה-Edge Function של ה-Magic Link קוראת). דפדפן עם
 -- anon key לא יכול לגעת בהן ישירות בשום מצב.
+
+
+-- SunSafe — Supabase schema (third slice: idempotency key ל-sessions
+-- שמסונכרנים מה-Mini App האופליין)
+-- See docs/2026-08-29-offline-session-miniapp-design.md סעיף 8.
+--
+-- client_uuid נוצר בצד הלקוח (crypto.randomUUID(), אופליין, בלי רשת)
+-- ברגע שסוגרים session ב-Mini App. ה-Edge Function submit-offline-session
+-- כותבת עם on_conflict=client_uuid + Prefer: resolution=ignore-duplicates
+-- (ראו index.ts) — כדי שאם הלקוח מנסה sync שוב אחרי שהתשובה הקודמת
+-- אבדה ברשת, לא נוצרת שורה כפולה. NULL עבור כל שאר השורות (sessions
+-- שנוצרו דרך /start_session ו-/end_session הרגילים, לא ה-Mini App).
+
+alter table exposure_log add column if not exists client_uuid text;
+
+-- בלי WHERE חלקי בכוונה: PostgREST מתרגם on_conflict=client_uuid ל-
+-- "ON CONFLICT (client_uuid)" בלי predicate, וזה לא תואם לאינדקס חלקי
+-- (Postgres דורש ON CONFLICT...WHERE תואם בדיוק לאינדקס partial, אחרת
+-- זורק "no unique or exclusion constraint matching"). אינדקס ייחודי רגיל
+-- לא באמת בעייתי כאן: PostgreSQL מטבעו לא אוכף ייחודיות בין ערכי NULL
+-- מרובים (כל שורה מה-בוט הרגיל, בלי client_uuid, נשארת NULL ותמיד מותרת).
+create unique index if not exists exposure_log_client_uuid_key
+    on exposure_log (client_uuid);

@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SunSafe — Session אופליין</title>
+<!--
+  Telegram Mini App SDK. טעינה חיצונית יחידה בעמוד — ה-Service Worker
+  (sw.js, קובץ אחות לצד index.html) מטמין גם אותה כדי שהעמוד יעבוד
+  לגמרי אופליין אחרי ביקור ראשון. אם הטעינה נכשלת (למשל העמוד נפתח
+  בדפדפן רגיל, לא בתוך טלגרם) — הקוד למטה בודק את window.Telegram
+  בזהירות ומציג מסך חסימה ברור, לא נכשל בשקט.
+-->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --border:         rgba(11,11,11,0.10);
+    --series-blue:    #2a78d6;
+    --status-good:     #0ca30c;
+    --status-warning:  #fab219;
+    --status-serious:  #ec835a;
+    --status-critical: #d03b3b;
+    --card-radius: 16px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --border:         rgba(255,255,255,0.10);
+      --series-blue:    #3987e5;
+      --status-good:     #0ca30c;
+      --status-warning:  #fab219;
+      --status-serious:  #ec835a;
+      --status-critical: #d03b3b;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    min-height: 100vh;
+  }
+
+  #app { max-width: 480px; margin: 0 auto; padding: 20px 16px 60px; }
+
+  header.top { text-align: center; margin-bottom: 18px; }
+  header.top h1 { font-size: 19px; margin: 0 0 4px; }
+  header.top .who { font-size: 12.5px; color: var(--text-muted); }
+
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: var(--card-radius); padding: 20px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 14px; margin: 0 0 10px; color: var(--text-secondary); }
+
+  .blocking-banner {
+    text-align: center; padding: 36px 20px;
+  }
+  .blocking-banner .emoji { font-size: 38px; margin-bottom: 10px; }
+  .blocking-banner p { color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
+
+  .big-btn {
+    display: block; width: 100%; border: none; border-radius: 14px;
+    padding: 18px 16px; font-size: 17px; font-weight: 700; font-family: inherit;
+    cursor: pointer; color: #fff;
+  }
+  .big-btn.start { background: var(--status-good); }
+  .big-btn.end { background: var(--status-critical); }
+  .big-btn:disabled { opacity: 0.55; cursor: default; }
+  .big-btn .sub { display: block; font-size: 12px; font-weight: 400; margin-top: 4px; opacity: 0.9; }
+
+  .elapsed { text-align: center; margin-bottom: 14px; }
+  .elapsed .time { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .elapsed .label { font-size: 12px; color: var(--text-muted); }
+
+  .spinner {
+    width: 26px; height: 26px; margin: 4px auto;
+    border: 3px solid var(--border); border-top-color: var(--series-blue);
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .capturing-note { text-align: center; font-size: 13px; color: var(--text-secondary); margin-top: 8px; }
+
+  .spf-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+  .spf-row label { font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
+  .spf-row input {
+    flex: 1; min-width: 0; border: 1px solid var(--border); background: var(--page);
+    color: var(--text-primary); border-radius: 8px; padding: 8px 10px; font-size: 14px; font-family: inherit;
+  }
+
+  .banner {
+    border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .banner.warn { background: rgba(250,178,25,0.14); color: #a06600; }
+  .banner.error { background: rgba(208,59,59,0.12); color: var(--status-critical); }
+  .banner.ok { background: rgba(10,163,10,0.12); color: var(--status-good); }
+
+  .queue-item {
+    border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+    margin-bottom: 8px; font-size: 12.5px; display: flex; justify-content: space-between; gap: 8px;
+  }
+  .queue-item .info { line-height: 1.6; }
+  .queue-item .info .muted { color: var(--text-muted); }
+  .queue-item .reason { color: var(--status-critical); font-size: 11.5px; margin-top: 2px; }
+  .queue-item .del {
+    border: none; background: none; color: var(--text-muted); cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 2px 4px; flex: none;
+  }
+  .queue-empty { color: var(--text-muted); font-size: 13px; text-align: center; padding: 8px 0; }
+
+  .sync-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
+  .sync-status { font-size: 12px; color: var(--text-muted); }
+  #sync-btn {
+    border: 1px solid var(--border); background: var(--page); color: var(--text-secondary);
+    font-size: 12.5px; padding: 7px 14px; border-radius: 8px; cursor: pointer; font-family: inherit; flex: none;
+  }
+  #sync-btn:hover { color: var(--text-primary); border-color: var(--series-blue); }
+
+  footer.note {
+    text-align: center; font-size: 11.5px; color: var(--text-muted);
+    margin-top: 4px; line-height: 1.7;
+  }
+</style>
+</head>
+<body>
+
+<div id="app" class="viz-root">
+
+  <!-- ============== חסימה: לא בתוך טלגרם / initData לא תקין ============== -->
+  <div id="blocking-screen" class="card blocking-banner" style="display:none;">
+    <div class="emoji" id="block-emoji">🔒</div>
+    <p id="block-message">יש לפתוח את העמוד הזה מתוך הבוט בטלגרם (לחצו על הכפתור בהודעת /offline_session).</p>
+  </div>
+
+  <!-- ============== האפליקציה עצמה ============== -->
+  <div id="main-app" style="display:none;">
+    <header class="top">
+      <h1>☀️ SunSafe — Session אופליין</h1>
+      <div class="who" id="who-line">—</div>
+    </header>
+
+    <div class="card">
+      <h2>Session נוכחי</h2>
+      <div id="action-area"></div>
+    </div>
+
+    <div class="card">
+      <h2>ממתין לסנכרון</h2>
+      <div id="queue-list"></div>
+      <div class="sync-row">
+        <span class="sync-status" id="sync-status">—</span>
+        <button id="sync-btn">🔄 סנכרן עכשיו</button>
+      </div>
+    </div>
+
+    <footer class="note">
+      טיפ: פתחו את הדף הזה פעם אחת כשיש לכם קליטה, לפני שיוצאים לשטח בלי אינטרנט —
+      כך הוא נשמר במכשיר וימשיך לעבוד גם בלי חיבור.<br>
+      Start/End כאן נשמרים במכשיר מיד, כולל מיקום GPS מדויק, ומסתנכרנים
+      אוטומטית לשרת כשהחיבור חוזר.
+    </footer>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------
+  // הגדרות
+  // ---------------------------------------------------------------
+  const SYNC_FUNCTION_URL =
+    "https://wccueensecchmqfwdecw.supabase.co/functions/v1/submit-offline-session";
+
+  const LS_OPEN_KEY = "sunsafe_offline_open_session";   // object | null
+  const LS_QUEUE_KEY = "sunsafe_offline_pending_queue"; // array
+
+  const GEO_TIMEOUT_MS = 30000; // בלי סיוע-רשת ל-GPS, fix ראשון יכול לקחת עד כ-30 שניות
+
+  let tg = null;
+  let initData = "";
+  let tgUser = null;
+  let elapsedTimer = null;
+
+  // ---------------------------------------------------------------
+  // אתחול Telegram Mini App SDK — הכל נלכד *מקומית* ברגע הפתיחה,
+  // בלי קריאת רשת, ולכן זמין גם אם המכשיר כבר אופליין באותו רגע.
+  // ---------------------------------------------------------------
+  function initTelegram() {
+    if (!window.Telegram || !window.Telegram.WebApp) {
+      showBlocking("🔌", "לא זוהתה סביבת Telegram. פתחו את העמוד הזה מתוך הבוט (כפתור /offline_session), לא כקישור רגיל בדפדפן.");
+      return false;
+    }
+    tg = window.Telegram.WebApp;
+    try { tg.ready(); tg.expand(); } catch (e) { /* לא קריטי */ }
+
+    initData = tg.initData || "";
+    if (!initData) {
+      showBlocking("🔒", "לא התקבל אימות מטלגרם (initData ריק). סגרו ופתחו את הדף הזה מחדש כשיש לכם קליטה.");
+      return false;
+    }
+
+    try {
+      const params = new URLSearchParams(initData);
+      const userRaw = params.get("user");
+      tgUser = userRaw ? JSON.parse(userRaw) : null;
+    } catch (e) {
+      tgUser = null;
+    }
+
+    return true;
+  }
+
+  function showBlocking(emoji, message) {
+    document.getElementById("block-emoji").textContent = emoji;
+    document.getElementById("block-message").textContent = message;
+    document.getElementById("blocking-screen").style.display = "block";
+    document.getElementById("main-app").style.display = "none";
+  }
+
+  // ---------------------------------------------------------------
+  // localStorage helpers
+  // ---------------------------------------------------------------
+  function getOpenSession() {
+    try { return JSON.parse(localStorage.getItem(LS_OPEN_KEY) || "null"); }
+    catch (e) { return null; }
+  }
+  function setOpenSession(obj) {
+    if (obj) localStorage.setItem(LS_OPEN_KEY, JSON.stringify(obj));
+    else localStorage.removeItem(LS_OPEN_KEY);
+  }
+  function getQueue() {
+    try { return JSON.parse(localStorage.getItem(LS_QUEUE_KEY) || "[]"); }
+    catch (e) { return []; }
+  }
+  function setQueue(arr) {
+    localStorage.setItem(LS_QUEUE_KEY, JSON.stringify(arr));
+  }
+
+  function makeUuid() {
+    if (window.crypto && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    // גיבוי ל-WebView ישן בלי crypto.randomUUID — מספיק כמפתח idempotency,
+    // לא צריך חוזק קריפטוגרפי לצורך הזה.
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+      const r = (Math.random() * 16) | 0;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+
+  // ---------------------------------------------------------------
+  // תפיסת GPS — עוטף getCurrentPosition בהבטחה (Promise) עם timeout
+  // ---------------------------------------------------------------
+  function captureLocation() {
+    return new Promise((resolve, reject) => {
+      if (!("geolocation" in navigator)) {
+        reject(new Error("no_geolocation"));
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({
+          lat: pos.coords.latitude,
+          lon: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+        }),
+        (err) => reject(err),
+        { enableHighAccuracy: true, timeout: GEO_TIMEOUT_MS, maximumAge: 0 }
+      );
+    });
+  }
+
+  // ---------------------------------------------------------------
+  // Start / End
+  // ---------------------------------------------------------------
+  async function handleStart() {
+    renderCapturing("מאתר מיקום GPS... זה יכול לקחת עד כ-30 שניות בלי קליטה.");
+    try {
+      const loc = await captureLocation();
+      setOpenSession({
+        start_time: new Date().toISOString(),
+        start_lat: loc.lat,
+        start_lon: loc.lon,
+        start_accuracy: loc.accuracy,
+      });
+      renderAction();
+    } catch (err) {
+      renderAction();
+      showActionError(geoErrorMessage(err));
+    }
+  }
+
+  async function handleEnd() {
+    const open = getOpenSession();
+    if (!open) { renderAction(); return; }
+
+    const spfInput = document.getElementById("spf-input");
+    const spfVal = spfInput && spfInput.value.trim() ? parseInt(spfInput.value.trim(), 10) : null;
+
+    renderCapturing("מאתר מיקום GPS לסיום ה-session...");
+    try {
+      const loc = await captureLocation();
+      const queue = getQueue();
+      queue.push({
+        client_uuid: makeUuid(),
+        start_time: open.start_time,
+        start_lat: open.start_lat,
+        start_lon: open.start_lon,
+        end_time: new Date().toISOString(),
+        end_lat: loc.lat,
+        end_lon: loc.lon,
+        spf: Number.isFinite(spfVal) ? spfVal : null,
+      });
+      setQueue(queue);
+      setOpenSession(null);
+      renderAll();
+      trySync(); // מנסה מיד — אם אין חיבור, פשוט נכשל בשקט וינסה שוב אח"כ
+    } catch (err) {
+      renderAction();
+      showActionError(geoErrorMessage(err));
+    }
+  }
+
+  function geoErrorMessage(err) {
+    if (err && err.message === "no_geolocation") return "המכשיר/הדפדפן לא תומך במיקום GPS.";
+    if (err && err.code === 1) return "הגישה למיקום נחסמה. אשרו הרשאת מיקום להגדרות ונסו שוב.";
+    if (err && err.code === 3) return "לא הצלחנו לאתר מיקום בזמן (timeout). נסו שוב — לפעמים לוקח יותר זמן בלי קליטה.";
+    return "לא הצלחנו לאתר מיקום. נסו שוב.";
+  }
+
+  function showActionError(message) {
+    const area = document.getElementById("action-area");
+    const banner = document.createElement("div");
+    banner.className = "banner error";
+    banner.textContent = "⚠️ " + message;
+    area.prepend(banner);
+  }
+
+  // ---------------------------------------------------------------
+  // סנכרון
+  // ---------------------------------------------------------------
+  async function trySync() {
+    const queue = getQueue();
+    const pending = queue.filter((s) => !s.rejected);
+    if (pending.length === 0) {
+      setSyncStatus(queue.length ? "יש פריטים שנדחו — ראו פירוט למטה" : "אין מה לסנכרן");
+      return;
+    }
+
+    setSyncStatus("מסנכרן...");
+    let resp;
+    try {
+      resp = await fetch(SYNC_FUNCTION_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData, sessions: pending }),
+      });
+    } catch (err) {
+      setSyncStatus("אין חיבור כרגע — ינסה שוב אוטומטית");
+      return;
+    }
+
+    let body;
+    try { body = await resp.json(); } catch (e) { body = null; }
+
+    if (!resp.ok || !body) {
+      if (resp.status === 401) {
+        setSyncStatus("אימות הזהות פג — סגרו ופתחו את הדף מחדש כשיש קליטה");
+      } else if (resp.status === 404) {
+        setSyncStatus("עוד לא הוגדר סוג עור בבוט (/set_skin_type) — הנתונים שמורים, ינסה שוב");
+      } else if (resp.status === 400 && body && body.error === "missing_username") {
+        setSyncStatus("אין לכם @username ציבורי בהגדרות טלגרם — הגדירו אחד כדי שהבוט יזהה אתכם");
+      } else {
+        setSyncStatus("שגיאת שרת בסנכרון — ינסה שוב אוטומטית");
+      }
+      return;
+    }
+
+    const accepted = new Set(body.accepted || []);
+    const rejectedMap = {};
+    (body.rejected || []).forEach((r) => { rejectedMap[r.client_uuid] = r.reason; });
+
+    const updated = queue
+      .filter((s) => !accepted.has(s.client_uuid))
+      .map((s) => rejectedMap[s.client_uuid] ? Object.assign({}, s, { rejected: rejectedMap[s.client_uuid] }) : s);
+
+    setQueue(updated);
+    renderAll();
+    setSyncStatus(accepted.size ? `סונכרנו ${accepted.size} sessions בהצלחה` : "סנכרון הושלם");
+  }
+
+  function setSyncStatus(text) {
+    const el = document.getElementById("sync-status");
+    if (el) el.textContent = text;
+  }
+
+  // ---------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------
+  function renderCapturing(note) {
+    const area = document.getElementById("action-area");
+    area.innerHTML = `<div class="spinner"></div><div class="capturing-note">${note}</div>`;
+  }
+
+  function renderAction() {
+    const area = document.getElementById("action-area");
+    const open = getOpenSession();
+
+    if (open) {
+      if (elapsedTimer) clearInterval(elapsedTimer);
+      area.innerHTML = `
+        <div class="elapsed">
+          <div class="time" id="elapsed-time">00:00</div>
+          <div class="label">פתוח מאז ${new Date(open.start_time).toLocaleTimeString("he-IL", {hour:"2-digit",minute:"2-digit"})}</div>
+        </div>
+        <div class="spf-row">
+          <label for="spf-input">SPF (רשות):</label>
+          <input type="number" id="spf-input" min="0" max="100" placeholder="למשל 30">
+        </div>
+        <button class="big-btn end" id="end-btn">🔴 סיים Session
+          <span class="sub">שומר מיקום + זמן סיום, במכשיר</span>
+        </button>
+      `;
+      document.getElementById("end-btn").addEventListener("click", handleEnd);
+      updateElapsed(open.start_time);
+      elapsedTimer = setInterval(() => updateElapsed(open.start_time), 1000);
+    } else {
+      area.innerHTML = `
+        <button class="big-btn start" id="start-btn">🟢 התחל Session
+          <span class="sub">שומר מיקום + זמן התחלה, במכשיר — גם בלי קליטה</span>
+        </button>
+      `;
+      document.getElementById("start-btn").addEventListener("click", handleStart);
+    }
+  }
+
+  function updateElapsed(startIso) {
+    const el = document.getElementById("elapsed-time");
+    if (!el) return;
+    const diff = Math.max(0, Date.now() - new Date(startIso).getTime());
+    const totalSec = Math.floor(diff / 1000);
+    const h = String(Math.floor(totalSec / 3600)).padStart(2, "0");
+    const m = String(Math.floor((totalSec % 3600) / 60)).padStart(2, "0");
+    const s = String(totalSec % 60).padStart(2, "0");
+    el.textContent = h !== "00" ? `${h}:${m}:${s}` : `${m}:${s}`;
+  }
+
+  function renderQueue() {
+    const list = document.getElementById("queue-list");
+    const queue = getQueue();
+    if (queue.length === 0) {
+      list.innerHTML = '<div class="queue-empty">אין sessions ממתינים — הכל מסונכרן.</div>';
+      return;
+    }
+    list.innerHTML = "";
+    queue.forEach((s) => {
+      const durMin = Math.round((new Date(s.end_time) - new Date(s.start_time)) / 60000);
+      const row = document.createElement("div");
+      row.className = "queue-item";
+      row.innerHTML = `
+        <div class="info">
+          ${new Date(s.start_time).toLocaleDateString("he-IL")} ·
+          ${new Date(s.start_time).toLocaleTimeString("he-IL", {hour:"2-digit",minute:"2-digit"})}–${new Date(s.end_time).toLocaleTimeString("he-IL", {hour:"2-digit",minute:"2-digit"})}
+          (${durMin} דק')
+          <div class="muted">${s.start_lat.toFixed(4)}, ${s.start_lon.toFixed(4)}${s.spf ? " · SPF " + s.spf : ""}</div>
+          ${s.rejected ? `<div class="reason">נדחה: ${s.rejected}</div>` : ""}
+        </div>
+        <button class="del" title="מחק פריט זה" data-uuid="${s.client_uuid}">✕</button>
+      `;
+      row.querySelector(".del").addEventListener("click", () => {
+        setQueue(getQueue().filter((q) => q.client_uuid !== s.client_uuid));
+        renderAll();
+      });
+      list.appendChild(row);
+    });
+  }
+
+  function renderWho() {
+    const el = document.getElementById("who-line");
+    el.textContent = tgUser ? `מחובר כ-@${tgUser.username || tgUser.first_name || tgUser.id}` : "מחובר לטלגרם";
+  }
+
+  function renderAll() {
+    renderWho();
+    renderAction();
+    renderQueue();
+    setSyncStatus(navigator.onLine ? "מוכן" : "אין חיבור כרגע");
+  }
+
+  // ---------------------------------------------------------------
+  // Service Worker — כדי שהעמוד יהיה זמין לגמרי אופליין אחרי ביקור
+  // ראשון (חובה כקובץ נפרד — מגבלת ה-API, לא בחירת עיצוב).
+  // ---------------------------------------------------------------
+  function registerServiceWorker() {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./sw.js").catch(() => { /* לא קריטי אם נכשל */ });
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Init
+  // ---------------------------------------------------------------
+  document.getElementById("sync-btn").addEventListener("click", trySync);
+  window.addEventListener("online", trySync);
+
+  if (initTelegram()) {
+    document.getElementById("blocking-screen").style.display = "none";
+    document.getElementById("main-app").style.display = "block";
+    renderAll();
+    trySync();
+  }
+  registerServiceWorker();
+})();
+</script>
+</body>
+</html>
