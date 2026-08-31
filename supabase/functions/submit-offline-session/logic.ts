@@ -151,6 +151,10 @@ export function calculateExposureScore(
   skinType: number,
   spf: number | null | undefined,
 ): number {
+  // UV=0 תקין לגמרי (session לילי) — 200/uvIndex עם 0 היה נותן Infinity/NaN.
+  // בלי חשיפה ל-UV הסיכון הוא אפס. תואם ל-calculate_exposure_score ב-
+  // bot_commands.py ול-mcp_weather_server.py — אותו באג תוקן בשלושתם יחד.
+  if (uvIndex <= 0) return 0;
   const factor = SKIN_TYPE_FACTOR[skinType] ?? 1.0;
   const protection = effectiveSpf(spf);
   const safeMinutes = (200 / uvIndex) * factor * protection;
