@@ -324,6 +324,7 @@
   }
 
   function exposureScore(session, skinType) {
+    if (session.uv <= 0) return 0; // UV=0 (למשל session שנפתח בלילה) — בלי חשיפה, בלי סיכון
     const duration = durationMinutes(session.start, session.end);
     const factor = SKIN_TYPE_FACTOR[skinType] || 1;
     const protection = effectiveSpf(session.spf);

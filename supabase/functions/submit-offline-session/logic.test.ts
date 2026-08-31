@@ -82,6 +82,10 @@ test("calculateExposureScore: matches calculate_exposure_score (Python) — no S
   assert.equal(calculateExposureScore(8, 30, 3, null), 120);
 });
 
+test("calculateExposureScore: uv_index=0 returns 0 instead of dividing by zero", () => {
+  assert.equal(calculateExposureScore(0, 120, 3, null), 0);
+});
+
 test("calculateExposureScore: unknown skin_type falls back to factor 1.0", () => {
   assert.equal(calculateExposureScore(8, 25, 99, null), calculateExposureScore(8, 25, 3, null));
 });
