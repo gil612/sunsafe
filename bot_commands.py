@@ -17,6 +17,7 @@ update_rows/upsert_row) — REST ישיר מול PostgREST דרך httpx, בלי
 SDK נוסף, עקבי עם שאר הקוד.
 """
 
+import io
 import logging
 import os
 import secrets
@@ -158,6 +159,22 @@ def send_message(chat_id: int, text: str, reply_markup: dict | None = None) -> N
             f"{TELEGRAM_API}/sendMessage",
             json=payload,
             timeout=10.0,
+        )
+        response.raise_for_status()
+
+
+def send_photo(chat_id: int, photo_bytes: bytes, caption: str | None = None) -> None:
+    """
+    שולח תמונה בודדת ל-Telegram (sendPhoto, multipart/form-data — בשונה
+    מ-send_message למעלה שהוא JSON טהור). לא היה בשימוש עד כה בפרויקט
+    (רק sendMessage); נדרש עבור תרשים תחזית ה-UV (send_uv_forecast_chart).
+    """
+    with httpx.Client() as client:
+        response = client.post(
+            f"{TELEGRAM_API}/sendPhoto",
+            data={"chat_id": chat_id, **({"caption": caption} if caption else {})},
+            files={"photo": ("uv_forecast.png", photo_bytes, "image/png")},
+            timeout=15.0,
         )
         response.raise_for_status()
 
@@ -364,12 +381,161 @@ def _can_start_session(chat_id: int, username: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------
+# תרשים תחזית UV להמשך היום — נשלח כתוספת best-effort אחרי הודעת האישור
+# הטקסטואלית ב-_begin_session. שלושה שלבים נפרדים (fetch/render/send)
+# כדי שכל שלב יהיה קל לבדוק/להחליף בנפרד; send_uv_forecast_chart היא
+# העטיפה היחידה שבפועל נקראת מבחוץ, וזו שאחראית לכשל-בלי-לקרוס.
+# ---------------------------------------------------------------------
+def fetch_uv_forecast_today(client: httpx.Client, lat: float, lon: float) -> tuple[list[str], list[float]]:
+    """
+    שולף תחזית UV שעתית ל"היום" *בזמן המקומי של המיקום עצמו*
+    (timezone=auto -> Open-Meteo מחזיר hourly.time כבר בזמן המקומי שם,
+    ו-forecast_days=1 מכסה את יום היומן המקומי המלא, לא UTC) ומחזיר רק
+    את השעות שעוד לא עברו החל מהשעה המקומית הנוכחית *באותו מיקום* —
+    utc_offset_seconds שמגיע בתשובה משמש לחשב את ה"עכשיו" שם, לא לפי
+    UTC/שעון השרת. חשוב במיוחד למיקומים רחוקים (למשל ניו יורק, UTC-4/5
+    בקיץ): בלי זה, השעות שחוזרות הן UTC גולמי בלי שום סימון, והתרשים
+    "המשך היום" מתחיל/מוצג בשעה שגויה ביחס לשעון בפועל באותו מקום
+    (תוקן אחרי שהתקבל תרשים לניו יורק שהתחיל ב"10:00" — זה היה 10:00
+    UTC, לא 10 בבוקר בניו יורק).
+    """
+    response = client.get(
+        OPEN_METEO_URL,
+        params={
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "uv_index",
+            "forecast_days": 1,
+            "timezone": "auto",
+        },
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    body = response.json()
+    hourly = body["hourly"]
+    times: list[str] = hourly["time"]
+    uvs: list[float] = hourly["uv_index"]
+    utc_offset_seconds = body.get("utc_offset_seconds", 0)
+
+    local_now_hour = (
+        datetime.now(timezone.utc) + timedelta(seconds=utc_offset_seconds)
+    ).replace(minute=0, second=0, microsecond=0, tzinfo=None)
+
+    rest_times: list[str] = []
+    rest_uvs: list[float] = []
+    for t, uv in zip(times, uvs):
+        if datetime.fromisoformat(t) >= local_now_hour:
+            rest_times.append(t)
+            rest_uvs.append(uv)
+    return rest_times, rest_uvs
+
+
+def render_uv_forecast_chart(hourly_times: list[str], hourly_uv: list[float], city_name: str) -> bytes:
+    """
+    מרנדר תרשים עמודות PNG (matplotlib, in-memory — io.BytesIO, בלי כתיבה
+    לדיסק) של תחזית UV להמשך היום. צבע כל עמודה לפי דרגת UV Index (תקן
+    WHO: Low/Moderate/High/Very High) וממופה לפלטת הסטטוס הקיימת של
+    SunSafe (--status-good/warning/serious/critical, ראו deploy_staging
+    /index.html) — כדי שהצבעים יהיו עקביים עם שאר האפליקציה.
+    import מקומי (לא בראש הקובץ) בכוונה: אם matplotlib חסר בסביבת
+    ה-deploy, רק הפיצ'ר הזה נכשל (ונתפס ב-send_uv_forecast_chart) —
+    שאר הבוט (כולל /start_session עצמו) ממשיך לעבוד כרגיל.
+    """
+    import matplotlib
+    matplotlib.use("Agg")  # רינדור ל-buffer בלבד, בלי חלון/תצוגה — נדרש בסביבת שרת
+    import matplotlib.pyplot as plt
+
+    STATUS_COLORS = {
+        "good": "#0ca30c",
+        "warning": "#fab219",
+        "serious": "#ec835a",
+        "critical": "#d03b3b",
+    }
+
+    def status_for_uv(uv: float) -> str:
+        # דרגות UV Index רשמיות של WHO (Low 0-2 / Moderate 3-5 / High 6-7 /
+        # Very High+Extreme 8+), מכווצות לארבע רמות הסטטוס הקיימות באפליקציה.
+        if uv < 3:
+            return "good"
+        if uv < 6:
+            return "warning"
+        if uv < 8:
+            return "serious"
+        return "critical"
+
+    hours = [datetime.fromisoformat(t).strftime("%H:%M") for t in hourly_times]
+    colors = [STATUS_COLORS[status_for_uv(uv)] for uv in hourly_uv]
+
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=150)
+    bars = ax.bar(hours, hourly_uv, color=colors, width=0.6, zorder=3)
+
+    ax.set_title("UV Forecast — Rest of Today", fontsize=13, pad=12)
+    ax.set_ylabel("UV Index")
+    ax.set_ylim(bottom=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", color="#e5e5e5", linewidth=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    plt.xticks(rotation=45, ha="right", fontsize=8)
+
+    if len(hours) <= 14:  # לא עמוסים אם יש עוד הרבה שעות היום (בבוקר מוקדם)
+        for bar, uv in zip(bars, hourly_uv):
+            ax.annotate(
+                f"{uv:.1f}",
+                (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                textcoords="offset points", xytext=(0, 3),
+                ha="center", fontsize=7, color="#555555",
+            )
+
+    legend_handles = [
+        plt.Rectangle((0, 0), 1, 1, color=color, label=label)
+        for label, color in [
+            ("Low", STATUS_COLORS["good"]),
+            ("Moderate", STATUS_COLORS["warning"]),
+            ("High", STATUS_COLORS["serious"]),
+            ("Very High", STATUS_COLORS["critical"]),
+        ]
+    ]
+    ax.legend(handles=legend_handles, loc="upper right", fontsize=7, frameon=False)
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def send_uv_forecast_chart(chat_id: int, city_name: str, lat: float, lon: float) -> None:
+    """
+    שולף+מרנדר+שולח את תרשים תחזית ה-UV — best-effort בכוונה: כל הפונקציה
+    עטופה ב-try/except רחב. session כבר נכתב ל-DB ואושר למשתמש בטקסט
+    לפני שהפונקציה הזו נקראת (ראו _begin_session) — כשל כאן (רשת, חבילה
+    חסרה, תגובה לא צפויה מ-Open-Meteo) לא אמור לעולם להיראות למשתמש
+    כתקלה ב-/start_session עצמו, רק להירשם ללוג.
+    """
+    try:
+        with httpx.Client() as client:
+            hourly_times, hourly_uv = fetch_uv_forecast_today(client, lat, lon)
+        if not hourly_uv:
+            logger.info("send_uv_forecast_chart: no remaining hours today for %s, skipping", city_name)
+            return
+        chart_png = render_uv_forecast_chart(hourly_times, hourly_uv, city_name)
+        send_photo(chat_id, chart_png, caption=f"📊 תחזית UV להמשך היום ב{city_name}")
+        logger.info("Sent UV forecast chart to chat_id=%s for %s (%d hours)", chat_id, city_name, len(hourly_uv))
+    except Exception:
+        logger.exception("send_uv_forecast_chart failed for chat_id=%s city=%s", chat_id, city_name)
+
+
 def _begin_session(
     chat_id: int,
     username: str,
     city_name: str,
     country: str | None,
     uv_index: float,
+    lat: float,
+    lon: float,
     clear_keyboard: bool = False,
 ) -> None:
     """כתיבת exposure_log + הודעת אישור — משותף לנתיב הקלדת-עיר ונתיב-מיקום."""
@@ -394,6 +560,7 @@ def _begin_session(
         reply_markup={"remove_keyboard": True} if clear_keyboard else None,
     )
     logger.info("Started session for @%s in %s (UV=%s)", username, city_name, uv_index)
+    send_uv_forecast_chart(chat_id, city_name, lat, lon)
 
 
 def handle_start_session(chat_id: int, username: str, args: str) -> None:
@@ -413,7 +580,7 @@ def handle_start_session(chat_id: int, username: str, args: str) -> None:
             return
         uv_index = get_current_uv(client, geo["latitude"], geo["longitude"])
 
-    _begin_session(chat_id, username, geo["name"], geo["country"], uv_index)
+    _begin_session(chat_id, username, geo["name"], geo["country"], uv_index, geo["latitude"], geo["longitude"])
 
 
 def handle_start_session_location(chat_id: int, username: str, lat: float, lon: float) -> None:
@@ -435,7 +602,7 @@ def handle_start_session_location(chat_id: int, username: str, lat: float, lon: 
             return
         uv_index = get_current_uv(client, lat, lon)
 
-    _begin_session(chat_id, username, geo["name"], geo["country"], uv_index, clear_keyboard=True)
+    _begin_session(chat_id, username, geo["name"], geo["country"], uv_index, lat, lon, clear_keyboard=True)
 
 
 # ---------------------------------------------------------------------

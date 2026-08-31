@@ -3,3 +3,4 @@ python-dotenv>=1.0
 google-genai>=0.3
 mcp>=1.27,<2.0
 gradio>=4.0
+matplotlib>=3.8
