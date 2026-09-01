@@ -17,6 +17,7 @@ update_rows/upsert_row) — REST ישיר מול PostgREST דרך httpx, בלי
 SDK נוסף, עקבי עם שאר הקוד.
 """
 
+import io
 import logging
 import os
 import secrets
@@ -27,7 +28,7 @@ import httpx
 from dotenv import load_dotenv
 
 from skin_type_classifier import classify_skin_type_from_image, validate_classification
-from supabase_client import SupabaseError, insert_row, select_rows, update_rows, upsert_row
+from supabase_client import SupabaseError, delete_rows, insert_row, select_rows, update_rows, upsert_row
 
 load_dotenv()
 
@@ -158,6 +159,22 @@ def send_message(chat_id: int, text: str, reply_markup: dict | None = None) -> N
             f"{TELEGRAM_API}/sendMessage",
             json=payload,
             timeout=10.0,
+        )
+        response.raise_for_status()
+
+
+def send_photo(chat_id: int, photo_bytes: bytes, caption: str | None = None) -> None:
+    """
+    שולח תמונה בודדת ל-Telegram (sendPhoto, multipart/form-data — בשונה
+    מ-send_message למעלה שהוא JSON טהור). לא היה בשימוש עד כה בפרויקט
+    (רק sendMessage); נדרש עבור תרשים תחזית ה-UV (send_uv_forecast_chart).
+    """
+    with httpx.Client() as client:
+        response = client.post(
+            f"{TELEGRAM_API}/sendPhoto",
+            data={"chat_id": chat_id, **({"caption": caption} if caption else {})},
+            files={"photo": ("uv_forecast.png", photo_bytes, "image/png")},
+            timeout=15.0,
         )
         response.raise_for_status()
 
@@ -364,12 +381,165 @@ def _can_start_session(chat_id: int, username: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------
+# תרשים תחזית UV להמשך היום — נשלח כתוספת best-effort אחרי הודעת האישור
+# הטקסטואלית ב-_begin_session. שלושה שלבים נפרדים (fetch/render/send)
+# כדי שכל שלב יהיה קל לבדוק/להחליף בנפרד; send_uv_forecast_chart היא
+# העטיפה היחידה שבפועל נקראת מבחוץ, וזו שאחראית לכשל-בלי-לקרוס.
+# ---------------------------------------------------------------------
+def fetch_uv_forecast_next_24h(
+    client: httpx.Client, lat: float, lon: float, from_time: datetime
+) -> tuple[list[str], list[float]]:
+    """
+    שולף תחזית UV שעתית ל-24 השעות הבאות *בזמן המקומי של המיקום עצמו*,
+    החל מהשעה שבה נפתח ה-session (from_time — datetime עם tzinfo, לרוב
+    UTC; לא "עכשיו" כללי בזמן קריאת הפונקציה, אלא הרגע שנשמר בפועל
+    ב-exposure_log ב-_begin_session). forecast_days=2 מבטיח מספיק שעות
+    גם כש-from_time קרוב לחצות המקומית (חלון 24 שעות עלול לחצות יום
+    יומן מקומי אחד). timezone=auto -> hourly.time כבר בזמן המקומי של
+    המיקום, לא UTC (תוקן אחרי שהתחזית לניו יורק הוצגה לפי שעון UTC
+    ולא לפי השעון המקומי שם); utc_offset_seconds שחוזר בתשובה ממיר את
+    from_time לזמן המקומי המתאים באותו מיקום.
+    """
+    response = client.get(
+        OPEN_METEO_URL,
+        params={
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "uv_index",
+            "forecast_days": 2,
+            "timezone": "auto",
+        },
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    body = response.json()
+    hourly = body["hourly"]
+    times: list[str] = hourly["time"]
+    uvs: list[float] = hourly["uv_index"]
+    utc_offset_seconds = body.get("utc_offset_seconds", 0)
+
+    local_start_hour = (from_time + timedelta(seconds=utc_offset_seconds)).replace(
+        minute=0, second=0, microsecond=0, tzinfo=None
+    )
+
+    window = [(t, uv) for t, uv in zip(times, uvs) if datetime.fromisoformat(t) >= local_start_hour][:24]
+    if not window:
+        return [], []
+    window_times, window_uvs = zip(*window)
+    return list(window_times), list(window_uvs)
+
+
+def render_uv_forecast_chart(hourly_times: list[str], hourly_uv: list[float], city_name: str) -> bytes:
+    """
+    מרנדר תרשים עמודות PNG (matplotlib, in-memory — io.BytesIO, בלי כתיבה
+    לדיסק) של תחזית UV להמשך היום. צבע כל עמודה לפי דרגת UV Index (תקן
+    WHO: Low/Moderate/High/Very High) וממופה לפלטת הסטטוס הקיימת של
+    SunSafe (--status-good/warning/serious/critical, ראו deploy_staging
+    /index.html) — כדי שהצבעים יהיו עקביים עם שאר האפליקציה.
+    import מקומי (לא בראש הקובץ) בכוונה: אם matplotlib חסר בסביבת
+    ה-deploy, רק הפיצ'ר הזה נכשל (ונתפס ב-send_uv_forecast_chart) —
+    שאר הבוט (כולל /start_session עצמו) ממשיך לעבוד כרגיל.
+    """
+    import matplotlib
+    matplotlib.use("Agg")  # רינדור ל-buffer בלבד, בלי חלון/תצוגה — נדרש בסביבת שרת
+    import matplotlib.pyplot as plt
+
+    STATUS_COLORS = {
+        "good": "#0ca30c",
+        "warning": "#fab219",
+        "serious": "#ec835a",
+        "critical": "#d03b3b",
+    }
+
+    def status_for_uv(uv: float) -> str:
+        # דרגות UV Index רשמיות של WHO (Low 0-2 / Moderate 3-5 / High 6-7 /
+        # Very High+Extreme 8+), מכווצות לארבע רמות הסטטוס הקיימות באפליקציה.
+        if uv < 3:
+            return "good"
+        if uv < 6:
+            return "warning"
+        if uv < 8:
+            return "serious"
+        return "critical"
+
+    hours = [datetime.fromisoformat(t).strftime("%H:%M") for t in hourly_times]
+    colors = [STATUS_COLORS[status_for_uv(uv)] for uv in hourly_uv]
+
+    fig, ax = plt.subplots(figsize=(11, 4.5), dpi=150)
+    bars = ax.bar(hours, hourly_uv, color=colors, width=0.65, zorder=3)
+
+    ax.set_title("UV Forecast — Next 24 Hours", fontsize=13, pad=12)
+    ax.set_ylabel("UV Index")
+    ax.set_ylim(bottom=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", color="#e5e5e5", linewidth=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    plt.xticks(rotation=60, ha="right", fontsize=7)
+
+    # תווית ישירה רק על שיא ה-UV (הערך הכי שימושי, לא על כל 24 העמודות —
+    # זה היה עמוס מדי לקריאה). ראו dataviz skill: "selective direct labels".
+    if hourly_uv:
+        peak_idx = max(range(len(hourly_uv)), key=lambda i: hourly_uv[i])
+        peak_bar = bars[peak_idx]
+        ax.annotate(
+            f"peak {hourly_uv[peak_idx]:.1f}",
+            (peak_bar.get_x() + peak_bar.get_width() / 2, peak_bar.get_height()),
+            textcoords="offset points", xytext=(0, 4),
+            ha="center", fontsize=8, color="#333333", fontweight="bold",
+        )
+
+    legend_handles = [
+        plt.Rectangle((0, 0), 1, 1, color=color, label=label)
+        for label, color in [
+            ("Low", STATUS_COLORS["good"]),
+            ("Moderate", STATUS_COLORS["warning"]),
+            ("High", STATUS_COLORS["serious"]),
+            ("Very High", STATUS_COLORS["critical"]),
+        ]
+    ]
+    ax.legend(handles=legend_handles, loc="upper right", fontsize=7, frameon=False)
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def send_uv_forecast_chart(chat_id: int, city_name: str, lat: float, lon: float, session_start: datetime) -> None:
+    """
+    שולף+מרנדר+שולח את תרשים תחזית ה-UV ל-24 השעות הבאות, החל משעת
+    פתיחת ה-session (session_start — לא "עכשיו" בזמן קריאת הפונקציה,
+    ראו fetch_uv_forecast_next_24h) — best-effort בכוונה: כל הפונקציה
+    עטופה ב-try/except רחב. session כבר נכתב ל-DB ואושר למשתמש בטקסט
+    לפני שהפונקציה הזו נקראת (ראו _begin_session) — כשל כאן (רשת, חבילה
+    חסרה, תגובה לא צפויה מ-Open-Meteo) לא אמור לעולם להיראות למשתמש
+    כתקלה ב-/start_session עצמו, רק להירשם ללוג.
+    """
+    try:
+        with httpx.Client() as client:
+            hourly_times, hourly_uv = fetch_uv_forecast_next_24h(client, lat, lon, session_start)
+        if not hourly_uv:
+            logger.info("send_uv_forecast_chart: no forecast hours available for %s, skipping", city_name)
+            return
+        chart_png = render_uv_forecast_chart(hourly_times, hourly_uv, city_name)
+        send_photo(chat_id, chart_png, caption=f"📊 תחזית UV ל-24 השעות הבאות ב{city_name}")
+        logger.info("Sent UV forecast chart to chat_id=%s for %s (%d hours)", chat_id, city_name, len(hourly_uv))
+    except Exception:
+        logger.exception("send_uv_forecast_chart failed for chat_id=%s city=%s", chat_id, city_name)
+
+
 def _begin_session(
     chat_id: int,
     username: str,
     city_name: str,
     country: str | None,
     uv_index: float,
+    lat: float,
+    lon: float,
     clear_keyboard: bool = False,
 ) -> None:
     """כתיבת exposure_log + הודעת אישור — משותף לנתיב הקלדת-עיר ונתיב-מיקום."""
@@ -394,6 +564,7 @@ def _begin_session(
         reply_markup={"remove_keyboard": True} if clear_keyboard else None,
     )
     logger.info("Started session for @%s in %s (UV=%s)", username, city_name, uv_index)
+    send_uv_forecast_chart(chat_id, city_name, lat, lon, now)
 
 
 def handle_start_session(chat_id: int, username: str, args: str) -> None:
@@ -413,7 +584,7 @@ def handle_start_session(chat_id: int, username: str, args: str) -> None:
             return
         uv_index = get_current_uv(client, geo["latitude"], geo["longitude"])
 
-    _begin_session(chat_id, username, geo["name"], geo["country"], uv_index)
+    _begin_session(chat_id, username, geo["name"], geo["country"], uv_index, geo["latitude"], geo["longitude"])
 
 
 def handle_start_session_location(chat_id: int, username: str, lat: float, lon: float) -> None:
@@ -435,7 +606,7 @@ def handle_start_session_location(chat_id: int, username: str, lat: float, lon: 
             return
         uv_index = get_current_uv(client, lat, lon)
 
-    _begin_session(chat_id, username, geo["name"], geo["country"], uv_index, clear_keyboard=True)
+    _begin_session(chat_id, username, geo["name"], geo["country"], uv_index, lat, lon, clear_keyboard=True)
 
 
 # ---------------------------------------------------------------------
@@ -483,6 +654,155 @@ def handle_end_session(chat_id: int, username: str, args: str) -> None:
 
 
 # ---------------------------------------------------------------------
+# /my_sessions, /edit_session, /delete_session — ניהול sessions קיימים
+# מתוך הבוט (בלי דשבורד/UI נפרד). נועד גם לתקן session שנתקע (כמו
+# id=38 ש-uv_index=0 שלו גרם ל-ZeroDivisionError בעבר, ראו התיקון של
+# calculate_exposure_score למעלה) בלי לפנות למפתח לתקן ידנית ב-SQL.
+# ---------------------------------------------------------------------
+def _fmt_dt(iso: str) -> str:
+    """מציג timestamp כ-'D.M HH:MM' (UTC) — תואם לפורמט התאריכים בשאר הבוט."""
+    dt = datetime.fromisoformat(iso)
+    return f"{dt.day}.{dt.month} {dt.strftime('%H:%M')}"
+
+
+def handle_my_sessions(chat_id: int, username: str) -> None:
+    """
+    /my_sessions — עד 8 ה-sessions האחרונים של המשתמש, עם ה-id של כל
+    אחד כדי לאפשר התייחסות אליו ב-/edit_session/-/delete_session.
+    """
+    sessions = select_rows(
+        "exposure_log",
+        {"telegram_username": f"eq.{username}", "order": "start_time.desc", "limit": "8"},
+    )
+    if not sessions:
+        send_message(chat_id, "עוד אין לך sessions רשומים. שלחו /start_session <עיר> כדי להתחיל.")
+        return
+
+    lines = ["ה-sessions האחרונים שלך:"]
+    for s in sessions:
+        start = _fmt_dt(s["start_time"])
+        if s["end_time"]:
+            status = f"{start}–{datetime.fromisoformat(s['end_time']).strftime('%H:%M')}"
+        else:
+            status = f"{start}→פתוח"
+
+        extra = []
+        if s["uv_index"] is not None:
+            extra.append(f"UV {s['uv_index']:.1f}")
+        if s["spf"]:
+            extra.append(f"SPF {s['spf']}")
+        if s["exposure_score"] is not None:
+            extra.append(f"ציון {s['exposure_score']}%")
+        extra_str = f" · {' · '.join(extra)}" if extra else ""
+
+        lines.append(f"#{s['id']} · {s['city']} · {status}{extra_str}")
+
+    lines.append("")
+    lines.append("למחיקה: /delete_session <מספר>")
+    lines.append("לעריכה: /edit_session <מספר> end=now|HH:MM ו/או spf=<מספר>")
+    send_message(chat_id, "\n".join(lines))
+
+
+def handle_delete_session(chat_id: int, username: str, args: str) -> None:
+    """/delete_session <id> — מוחק session, רק אם הוא שייך למשתמש שביקש."""
+    session_id = args.strip()
+    if not session_id.isdigit():
+        send_message(chat_id, "שימוש: /delete_session <מספר> (ראו /my_sessions למספרים).")
+        return
+
+    rows = select_rows("exposure_log", {"id": f"eq.{session_id}"})
+    if not rows or rows[0]["telegram_username"] != username:
+        # אותה הודעה גם אם ה-id שייך למישהו אחר וגם אם הוא לא קיים —
+        # לא חושפים למשתמש אם id מסוים "תפוס" ע"י מישהו אחר.
+        send_message(chat_id, "לא נמצא session כזה. שלחו /my_sessions לרשימה מעודכנת.")
+        return
+
+    session = rows[0]
+    delete_rows("exposure_log", {"id": f"eq.{session_id}"})
+    send_message(chat_id, f"נמחק: session #{session_id} ב{session['city']} ({_fmt_dt(session['start_time'])}).")
+    logger.info("Deleted session id=%s for @%s", session_id, username)
+
+
+def handle_edit_session(chat_id: int, username: str, args: str) -> None:
+    """
+    /edit_session <id> [end=now|HH:MM] [spf=<מספר>] — עריכת session קיים
+    (סוגר session תקוע, מתקן SPF ששכחו לציין וכו'). לפחות אחד מ-end/spf
+    חייב להינתן. HH:MM מתפרש כאותו יום קלנדרי כמו start_time — אם השעה
+    "לפני" שעת ההתחלה, מניחים חציית חצות ומזיזים ליום הבא. מדד החשיפה
+    מחושב מחדש בכל עריכה שיש אחריה end_time (חדש או קיים) — אחרת נשאר
+    None, בדיוק כמו session פתוח רגיל (יחושב סופית ב-/end_session).
+    """
+    parts = args.strip().split()
+    if not parts or not parts[0].isdigit():
+        send_message(
+            chat_id,
+            "שימוש: /edit_session <מספר> end=now|HH:MM ו/או spf=<מספר>\n"
+            "לדוגמה: /edit_session 38 end=now spf=30\n"
+            "(ראו /my_sessions למספרים).",
+        )
+        return
+
+    session_id = parts[0]
+    fields = {}
+    for token in parts[1:]:
+        key, sep, value = token.partition("=")
+        if sep and key in ("end", "spf"):
+            fields[key] = value
+
+    if not fields:
+        send_message(chat_id, "צריך לציין לפחות end=... או spf=... לעריכה.")
+        return
+
+    rows = select_rows("exposure_log", {"id": f"eq.{session_id}"})
+    if not rows or rows[0]["telegram_username"] != username:
+        send_message(chat_id, "לא נמצא session כזה. שלחו /my_sessions לרשימה מעודכנת.")
+        return
+    session = rows[0]
+
+    patch = {}
+
+    if "spf" in fields:
+        if not fields["spf"].isdigit():
+            send_message(chat_id, "spf חייב להיות מספר, למשל spf=30.")
+            return
+        patch["spf"] = int(fields["spf"])
+
+    if "end" in fields:
+        start_time = datetime.fromisoformat(session["start_time"])
+        if fields["end"].lower() == "now":
+            end_time = datetime.now(timezone.utc)
+        else:
+            try:
+                hh, mm = fields["end"].split(":")
+                end_time = start_time.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+                if end_time <= start_time:
+                    end_time += timedelta(days=1)  # session שחצה חצות
+            except (ValueError, IndexError):
+                send_message(chat_id, "פורמט שעה לא תקין. השתמשו ב-end=now או end=HH:MM (למשל end=22:30).")
+                return
+        patch["end_time"] = end_time.isoformat()
+
+    effective_end = patch.get("end_time", session["end_time"])
+    effective_spf = patch.get("spf", session["spf"])
+    if effective_end:
+        end_dt = datetime.fromisoformat(effective_end)
+        start_dt = datetime.fromisoformat(session["start_time"])
+        duration_minutes = (end_dt - start_dt).total_seconds() / 60
+        if duration_minutes < 0:
+            send_message(chat_id, "שעת הסיום לא יכולה להיות לפני שעת ההתחלה.")
+            return
+        users = select_rows("users", {"telegram_username": f"eq.{username}"})
+        skin_type = users[0]["skin_type"] if users else 3
+        patch["exposure_score"] = calculate_exposure_score(
+            session["uv_index"], duration_minutes, skin_type, effective_spf
+        )
+
+    update_rows("exposure_log", {"id": f"eq.{session_id}"}, patch)
+    send_message(chat_id, f"עודכן: session #{session_id} ב{session['city']}.")
+    logger.info("Edited session id=%s for @%s: %s", session_id, username, patch)
+
+
+# ---------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------
 COMMAND_HANDLERS = {
@@ -491,6 +811,9 @@ COMMAND_HANDLERS = {
     "/start_session": handle_start_session,
     "/end_session": handle_end_session,
     "/offline_session": handle_offline_session,
+    "/my_sessions": lambda chat_id, username, args: handle_my_sessions(chat_id, username),
+    "/delete_session": handle_delete_session,
+    "/edit_session": handle_edit_session,
 }
 
 

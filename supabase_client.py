@@ -1,16 +1,3 @@
-"""
-SunSafe — Supabase Client
---------------------------
-A thin wrapper around Supabase's PostgREST REST API for inserting rows,
-built directly on httpx (no supabase-py SDK) — same approach as
-telegram_client.py and mcp_weather_server.py's calls to Open-Meteo.
-
-Install:
-    pip install httpx python-dotenv
-
-Run as a standalone check:
-    python supabase_client.py
-"""
 
 import os
 import logging
@@ -46,12 +33,6 @@ class SupabaseConfig:
 
 
 def insert_row(table: str, row: dict, config: "SupabaseConfig | None" = None) -> dict:
-    """
-    Insert a single row into a Supabase table via PostgREST and return the
-    inserted row (including its generated id).
-    Raises SupabaseError on any failure — callers that must not let a
-    logging failure break the main flow should catch this explicitly.
-    """
     config = config or SupabaseConfig.from_env()
     url = f"{config.url.rstrip('/')}/rest/v1/{table}"
     headers = {
@@ -60,20 +41,15 @@ def insert_row(table: str, row: dict, config: "SupabaseConfig | None" = None) ->
         "Content-Type": "application/json",
         "Prefer": "return=representation",
     }
-    try:
-        response = httpx.post(url, headers=headers, json=row, timeout=10.0)
-        response.raise_for_status()
-        inserted = response.json()
-        return inserted[0] if isinstance(inserted, list) else inserted
-    except httpx.HTTPStatusError as e:
-        logger.error("Supabase insert into %s failed (%s): %s", table, e.response.status_code, e.response.text)
-        raise SupabaseError(f"הוספת שורה ל-{table} נכשלה: {e.response.text}") from e
-    except httpx.RequestError as e:
-        logger.error("Supabase request to %s failed: %s", table, e)
-        raise SupabaseError(f"בקשת רשת ל-Supabase נכשלה: {e}") from e
-    except (ValueError, KeyError, IndexError) as e:
-        logger.error("Supabase response parsing failed for %s: %s", table, e)
-        raise SupabaseError(f"פענוח התגובה מ-Supabase נכשל: {e}") from e
+    response = httpx.post(url, headers=headers, json=row, timeout=10.0)
+    response.raise_for_status()
+    inserted = response.json()
+    return inserted[0] if isinstance(inserted, list) else inserted
+
+
+
+import httpx
+
 
 def select_rows(table: str, params: dict, config: "SupabaseConfig | None" = None) -> list:
     """
@@ -127,6 +103,32 @@ def update_rows(table: str, params: dict, patch: dict, config: "SupabaseConfig |
         raise SupabaseError(f"בקשת רשת ל-Supabase נכשלה: {e}") from e
 
 
+def delete_rows(table: str, params: dict, config: "SupabaseConfig | None" = None) -> list:
+    """
+    Delete rows matching PostgREST filters, e.g.
+    delete_rows("exposure_log", {"id": "eq.42"}).
+    Returns the deleted rows (as PostgREST returns them) — an empty list
+    means nothing matched the filter (not an error).
+    """
+    config = config or SupabaseConfig.from_env()
+    url = f"{config.url.rstrip('/')}/rest/v1/{table}"
+    headers = {
+        "apikey": config.service_role_key,
+        "Authorization": f"Bearer {config.service_role_key}",
+        "Prefer": "return=representation",
+    }
+    try:
+        response = httpx.delete(url, headers=headers, params=params, timeout=10.0)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error("Supabase delete from %s failed (%s): %s", table, e.response.status_code, e.response.text)
+        raise SupabaseError(f"מחיקת שורה מ-{table} נכשלה: {e.response.text}") from e
+    except httpx.RequestError as e:
+        logger.error("Supabase request to %s failed: %s", table, e)
+        raise SupabaseError(f"בקשת רשת ל-Supabase נכשלה: {e}") from e
+
+
 def upsert_row(table: str, row: dict, on_conflict: str, config: "SupabaseConfig | None" = None) -> dict:
     """
     Insert a row, or update it in place if a row with the same
@@ -154,21 +156,3 @@ def upsert_row(table: str, row: dict, on_conflict: str, config: "SupabaseConfig 
     except httpx.RequestError as e:
         logger.error("Supabase request to %s failed: %s", table, e)
         raise SupabaseError(f"בקשת רשת ל-Supabase נכשלה: {e}") from e
-
-
-if __name__ == "__main__":
-    # בדיקה עצמאית מהירה — מריצים "python supabase_client.py"
-    result = insert_row(
-        "uv_readings",
-        {
-            "query_city": "test",
-            "resolved_city": "Test City",
-            "country": "Testland",
-            "lat": 0.0,
-            "lon": 0.0,
-            "uv_index": 1.0,
-            "temperature_2m": 20.0,
-            "cloud_cover": 0,
-        },
-    )
-    print(f"נכתבה שורה בהצלחה, id={result['id']}")
