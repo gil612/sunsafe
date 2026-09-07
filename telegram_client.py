@@ -1,21 +1,20 @@
 """
 SunSafe — Telegram Client
 --------------------------
-A thin wrapper around the Telegram Bot API for sending text messages and UV
-alerts. Used both for local testing and as an importable module inside a
-FastAPI server.
+עטיפה פשוטה סביב Telegram Bot API לשליחת הודעות טקסט והתראות UV.
+משמש גם לבדיקות מקומיות וגם ניתן לייבוא בתוך שרת FastAPI.
 
-Install:
+התקנה:
     pip install httpx python-dotenv
 
-Run as a standalone check:
+הרצה כבדיקה עצמאית:
     python telegram_client.py
 """
 
 import os
 import re
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 from dotenv import load_dotenv
@@ -25,6 +24,11 @@ load_dotenv()
 logger = logging.getLogger("sunsafe.telegram")
 logging.basicConfig(level=logging.INFO)
 
+# ראו ההערה המקבילה ב-bot_commands.py: httpx רושם ללוג את ה-URL המלא של
+# כל בקשה ברמת INFO, וה-URL כאן כולל את ה-BOT_TOKEN עצמו — בלי זה הטוקן
+# היה מודלף לכל לוג/מסוף שמריץ את הקובץ הזה.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}"
 
 # תווים ש-MarkdownV2 של טלגרם דורש לברוח מהם (Escape)
@@ -33,12 +37,12 @@ _MDV2_SPECIAL_CHARS = r"_*[]()~`>#+-=|{}.!"
 
 
 class TelegramError(Exception):
-    """Raised when a call to the Telegram API fails."""
+    """נזרק כשקריאה ל-Telegram API נכשלת."""
 
 
 @dataclass
 class TelegramConfig:
-    bot_token: str = field(repr=False)
+    bot_token: str
     default_chat_id: str | None = None
 
     @classmethod
@@ -53,9 +57,9 @@ class TelegramConfig:
 
 def escape_markdown_v2(text: str) -> str:
     """
-    Escape special characters so free-form text (e.g. from an AI) does not
-    break Telegram's MarkdownV2 format. Must be applied to any dynamic text
-    (for example, a Gemini answer) before sending with parse_mode="MarkdownV2".
+    בורח מתווים מיוחדים כדי שטקסט חופשי (למשל מ-AI) לא ישבור את
+    פורמט ה-MarkdownV2 של טלגרם. חובה להפעיל על כל טקסט דינמי
+    (לדוגמה: תשובת Gemini) לפני שליחה עם parse_mode="MarkdownV2".
     """
     pattern = f"([{re.escape(_MDV2_SPECIAL_CHARS)}])"
     return re.sub(pattern, r"\\\1", text)
@@ -91,7 +95,7 @@ class TelegramClient:
         parse_mode: str | None = "Markdown",
         disable_web_page_preview: bool = True,
     ) -> dict:
-        """Send a plain text message (for example, a UV alert)."""
+        """שולח הודעת טקסט פשוטה (למשל התראת UV)."""
         target_chat_id = chat_id or self.config.default_chat_id
         if not target_chat_id:
             raise ValueError("לא סופק chat_id ואין CHAT_ID ברירת מחדל ב-.env")
@@ -115,8 +119,8 @@ class TelegramClient:
         chat_id: str | int | None = None,
     ) -> dict:
         """
-        Send a message with quick-reply buttons (Reply Keyboard).
-        Useful, for example, for a skin-type questionnaire: ["Type I", "Type II", ...]
+        שולח הודעה עם כפתורי תשובה מהירה (Reply Keyboard).
+        שימושי למשל לשאלון קביעת סוג עור: ["Type I", "Type II", ...]
         """
         target_chat_id = chat_id or self.config.default_chat_id
         payload = {
@@ -131,7 +135,7 @@ class TelegramClient:
         return self._post("sendMessage", payload)
 
     def get_me(self) -> dict:
-        """Verify that the token is valid and return the bot's details."""
+        """מאמת שה-Token תקין ומחזיר את פרטי הבוט."""
         url = f"{self._base_url}/getMe"
         response = httpx.get(url, timeout=self._timeout)
         response.raise_for_status()
@@ -147,9 +151,8 @@ def send_uv_alert(
     cost_usd: float | None = None,
 ) -> dict:
     """
-    Build and send a formatted UV alert, following the format defined in the SPEC.
-    `recommendation` usually comes from Gemini, so it is escaped before being
-    embedded in Markdown.
+    בונה ושולח התראת UV מפורמטת, בהתאם לפורמט שהוגדר ב-SPEC.
+    recommendation מגיע לרוב מ-Gemini, ולכן עובר escape לפני שילוב ב-Markdown.
     """
     safe_reco = escape_markdown_v2(recommendation)
     lines = [

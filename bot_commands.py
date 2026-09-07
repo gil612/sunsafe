@@ -38,6 +38,14 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+# httpx רושם ללוג (ברמת INFO) את ה-URL המלא של כל בקשה כברירת מחדל —
+# ו-TELEGRAM_API למטה כולל את ה-BOT_TOKEN עצמו בתוך ה-URL (לא ב-header).
+# בלי השורה הזו, כל send_message/send_photo/getUpdates מדליף את הטוקן
+# ללוגים בטקסט גלוי — כולל ל-HF Space logs (Application Startup) שכבר
+# נראים בפועל בהיסטוריה הזו. אותה בעיה קיימת גם ב-telegram_client.py
+# וב-set_bot_profile.py, ותוקנה שם באותו אופן.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DASHBOARD_BASE_URL = os.environ.get("DASHBOARD_BASE_URL", "http://localhost:8080")
 # ה-Mini App לתיעוד session אופליין (docs/session/index.html). ברירת
@@ -90,24 +98,68 @@ def calculate_exposure_score(uv_index: float, duration_minutes: float, skin_type
 # Open-Meteo — geocoding + UV (עותק מקומי, מקביל ל-mcp_weather_server.py;
 # הכלים שם עטופים ב-@mcp.tool ולא נוחים לייבוא ישיר מסקריפט חיצוני)
 # ---------------------------------------------------------------------
-def geocode_city(client: httpx.Client, city_name: str) -> dict:
+def _raw_geocode_search(client: httpx.Client, name: str, count: int = 1) -> list[dict]:
+    """קריאה גולמית ל-Open-Meteo Geocoding — מחזירה עד `count` מועמדים גולמיים."""
     response = client.get(
         GEOCODING_URL,
-        params={"name": city_name, "count": 1, "language": "he", "format": "json"},
+        params={"name": name, "count": count, "language": "he", "format": "json"},
         timeout=10.0,
     )
     response.raise_for_status()
     results = response.json().get("results") or []
-    if not results:
-        return {"found": False}
-    top = results[0]
-    return {
-        "found": True,
-        "name": top.get("name"),
-        "country": top.get("country"),
-        "latitude": top.get("latitude"),
-        "longitude": top.get("longitude"),
-    }
+    return [
+        {
+            "name": r.get("name"),
+            "country": r.get("country"),
+            "latitude": r.get("latitude"),
+            "longitude": r.get("longitude"),
+        }
+        for r in results
+    ]
+
+
+def _text_matches(hint: str, value: str | None) -> bool:
+    """
+    התאמת טקסט "רכה" בין country_hint שהמשתמש הקליד לבין שדה country
+    שחזר מ-Open-Meteo — בלי תלות במקף/גרשיים, ובכיוון הכלה כלשהו (כך
+    ש"ארה\"ב" יתאים גם ל"ארצות הברית" אם אחד מהם מוכל במשנהו, לא רק
+    שוויון מדויק).
+    """
+    if not value or not hint:
+        return False
+    normalize = lambda s: s.strip().replace("-", " ").replace("״", "").replace('"', "")
+    hint_n, value_n = normalize(hint), normalize(value)
+    return bool(hint_n) and (hint_n in value_n or value_n in hint_n)
+
+
+def geocode_city(client: httpx.Client, city_name: str) -> dict:
+    """
+    מזהה עיר לפי שם חופשי. קודם מנסים את המחרוזת המלאה כמו שהיא — המקרה
+    השכיח, שם עיר יחיד כמו "תל אביב". אם זה נכשל וישנן כמה מילים, כנראה
+    שם העיר מלווה בציון מדינה (כמו "סן חוזה קוסטה ריקה" — כדי להבדיל
+    מ-San Jose שבארה"ב, שהיא עיר גדולה יותר ותקבל עדיפות בברירת המחדל
+    של Open-Meteo לפי אוכלוסייה). ל-Open-Meteo אין פרמטר סינון-לפי-מדינה
+    נפרד, אז מפצלים את המחרוזת לחלק-עיר וחלק-מדינה (1 עד 3 המילים
+    האחרונות — מכסה גם מדינות דו-מילתיות כמו "קוסטה ריקה"), שולפים כמה
+    מועמדים לחלק-העיר, ובודקים איזה מהם ה-country שלו תואם את חלק-המדינה.
+    בלי התאמה בשום פיצול — "לא נמצא", בלי לנחש עיר שגויה בשקט.
+    """
+    results = _raw_geocode_search(client, city_name, count=1)
+    if results:
+        return {"found": True, **results[0]}
+
+    tokens = city_name.strip().split()
+    for suffix_len in (1, 2, 3):
+        if len(tokens) <= suffix_len:
+            break
+        city_part = " ".join(tokens[:-suffix_len])
+        country_hint = " ".join(tokens[-suffix_len:])
+        candidates = _raw_geocode_search(client, city_part, count=10)
+        match = next((c for c in candidates if _text_matches(country_hint, c.get("country"))), None)
+        if match:
+            return {"found": True, **match}
+
+    return {"found": False}
 
 
 def get_current_uv(client: httpx.Client, lat: float, lon: float) -> float:
@@ -557,9 +609,13 @@ def _begin_session(
             "exposure_score": None,
         },
     )
+    # מציגים גם country בהודעת האישור — כדי שאם geocode_city פענח עיר לא
+    # נכונה (למשל "סן חוזה" -> ארה"ב במקום קוסטה ריקה) המשתמש יבחין מיד
+    # ולא רק כשה-UV/מזג האוויר לא הגיוני.
+    location_label = f"{city_name}, {country}" if country else city_name
     send_message(
         chat_id,
-        f"התחלת session ב{city_name} (UV נוכחי: {uv_index:.1f}). "
+        f"התחלת session ב{location_label} (UV נוכחי: {uv_index:.1f}). "
         "כשתסיימו, שלחו /end_session (או /end_session <SPF> אם השתמשתם בקרם הגנה).",
         reply_markup={"remove_keyboard": True} if clear_keyboard else None,
     )
@@ -654,6 +710,190 @@ def handle_end_session(chat_id: int, username: str, args: str) -> None:
 
 
 # ---------------------------------------------------------------------
+# /add_session — רישום ידני מלא של session שכבר הסתיים, בפקודת טקסט
+# אחת (בשונה מ-/offline_session שפותח Mini App). UV Index נשלף אוטומטית
+# מההיסטוריה של Open-Meteo לפי העיר והשעה שצוינו; uv=<מספר> הוא escape
+# hatch ידני למקרה שההיסטוריה לא זמינה (Open-Meteo תומך עד 92 יום אחורה,
+# ולפעמים אין נתון גם בטווח הזה).
+# ---------------------------------------------------------------------
+def _parse_kv_fields(tokens: list[str], allowed_keys: set[str]) -> tuple[list[str], dict]:
+    """
+    מפריד רשימת טוקנים לחלק "טקסט חופשי" (בהתחלה, למשל שם עיר עם רווחים)
+    ואחריו זוגות key=value. עוצר בטוקן הראשון עם "=" שהמפתח שלו מוכר,
+    ואוסף את כל ה-key=value מאותה נקודה והלאה. מחזיר (free_text_tokens, fields).
+    """
+    for i, tok in enumerate(tokens):
+        key, sep, _ = tok.partition("=")
+        if sep and key in allowed_keys:
+            fields = {}
+            for t in tokens[i:]:
+                k, s, v = t.partition("=")
+                if s and k in allowed_keys:
+                    fields[k] = v
+            return tokens[:i], fields
+    return tokens, {}
+
+
+def fetch_historical_uv(client: httpx.Client, lat: float, lon: float, target_time: datetime) -> float | None:
+    """
+    שולף UV Index היסטורי לשעה מדויקת (target_time, מניחים UTC "גולמי" —
+    בלי המרת אזור זמן, עקבי עם ההנחה הפשוטה שכבר קיימת ב-/edit_session
+    ש-HH:MM שמוזן ע"י המשתמש הוא הזמן "כמו שהוא"). timezone=UTC (לא auto
+    כמו fetch_uv_forecast_next_24h) בדיוק כדי ש-hourly.time יתאים ישירות
+    ל-target_time בלי המרה. past_days מחושב מההפרש בין היום לתאריך המבוקש;
+    Open-Meteo תומך עד 92 יום אחורה — מעבר לזה (או שהתאריך בעתיד) מחזירים
+    None ומשאירים ל-handle_add_session להחליט איך להגיב.
+    """
+    today = datetime.now(timezone.utc).date()
+    days_back = (today - target_time.date()).days
+    if not (0 <= days_back <= 92):
+        return None
+
+    response = client.get(
+        OPEN_METEO_URL,
+        params={
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "uv_index",
+            "past_days": days_back,
+            "forecast_days": 1,
+            "timezone": "UTC",
+        },
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    hourly = response.json()["hourly"]
+    times: list[str] = hourly["time"]
+    uvs: list[float] = hourly["uv_index"]
+
+    target_hour = target_time.replace(minute=0, second=0, microsecond=0, tzinfo=None).isoformat(timespec="minutes")
+    for t, uv in zip(times, uvs):
+        if t == target_hour and uv is not None:
+            return uv
+    return None
+
+
+def handle_add_session(chat_id: int, username: str, args: str) -> None:
+    """
+    /add_session <עיר> start=HH:MM end=HH:MM [spf=<מספר>] [date=D.M] [uv=<מספר>]
+    לדוגמה: /add_session תל אביב start=14:00 end=16:30 spf=30
+
+    בלי date — מניחים היום. end<=start מתפרש כחציית חצות (יום למחרת),
+    כמו ב-/edit_session. uv= הוא override ידני; בלעדיו שולפים UV היסטורי
+    אוטומטית (fetch_historical_uv).
+    """
+    ALLOWED = {"start", "end", "spf", "date", "uv"}
+    tokens = args.strip().split()
+    city_tokens, fields = _parse_kv_fields(tokens, ALLOWED)
+    city = " ".join(city_tokens).strip()
+
+    usage = (
+        "שימוש: /add_session <עיר> start=HH:MM end=HH:MM [spf=<מספר>] [date=D.M]\n"
+        "לדוגמה: /add_session תל אביב start=14:00 end=16:30 spf=30\n"
+        "(בלי date מניחים היום; UV Index נשלף אוטומטית לפי ההיסטוריה)."
+    )
+    if not city or "start" not in fields or "end" not in fields:
+        send_message(chat_id, usage)
+        return
+
+    users = select_rows("users", {"telegram_username": f"eq.{username}"})
+    if not users:
+        send_message(chat_id, "קודם צריך להגדיר סוג עור: /set_skin_type <1-6>")
+        return
+    skin_type = users[0]["skin_type"]
+
+    now = datetime.now(timezone.utc)
+    target_date = now.date()
+    if "date" in fields:
+        try:
+            day, month = fields["date"].split(".")
+            target_date = target_date.replace(month=int(month), day=int(day))
+            if target_date > now.date():
+                target_date = target_date.replace(year=target_date.year - 1)
+        except (ValueError, IndexError):
+            send_message(chat_id, "פורמט תאריך לא תקין. השתמשו ב-date=D.M (למשל date=25.8).")
+            return
+
+    try:
+        start_hh, start_mm = fields["start"].split(":")
+        start_time = datetime(
+            target_date.year, target_date.month, target_date.day,
+            int(start_hh), int(start_mm), tzinfo=timezone.utc,
+        )
+    except (ValueError, IndexError):
+        send_message(chat_id, "פורמט שעת התחלה לא תקין. השתמשו ב-start=HH:MM (למשל start=14:00).")
+        return
+
+    try:
+        end_hh, end_mm = fields["end"].split(":")
+        end_time = start_time.replace(hour=int(end_hh), minute=int(end_mm), second=0, microsecond=0)
+        if end_time <= start_time:
+            end_time += timedelta(days=1)  # session שחצה חצות
+    except (ValueError, IndexError):
+        send_message(chat_id, "פורמט שעת סיום לא תקין. השתמשו ב-end=HH:MM (למשל end=16:30).")
+        return
+
+    if end_time > now:
+        send_message(chat_id, "שעת הסיום לא יכולה להיות בעתיד.")
+        return
+
+    spf = None
+    if "spf" in fields:
+        if not fields["spf"].isdigit():
+            send_message(chat_id, "spf חייב להיות מספר, למשל spf=30.")
+            return
+        spf = int(fields["spf"])
+
+    with httpx.Client() as client:
+        geo = geocode_city(client, city)
+        if not geo["found"]:
+            send_message(chat_id, f'לא הצלחתי לזהות עיר בשם "{city}". בדקו את האיות ונסו שוב.')
+            return
+
+        if "uv" in fields:
+            try:
+                uv_index = float(fields["uv"])
+            except ValueError:
+                send_message(chat_id, "uv חייב להיות מספר, למשל uv=6.5.")
+                return
+        else:
+            uv_index = fetch_historical_uv(client, geo["latitude"], geo["longitude"], start_time)
+            if uv_index is None:
+                send_message(
+                    chat_id,
+                    "לא הצלחתי לשלוף UV היסטורי לשעה/תאריך הזה (זמין עד כ-92 יום אחורה, "
+                    "ולפעמים פחות). אפשר לנסות עם date= קרוב יותר, או להוסיף uv=<מספר> "
+                    "ידנית לפקודה.",
+                )
+                return
+
+    duration_minutes = (end_time - start_time).total_seconds() / 60
+    score = calculate_exposure_score(uv_index, duration_minutes, skin_type, spf)
+
+    insert_row(
+        "exposure_log",
+        {
+            "telegram_username": username,
+            "city": geo["name"],
+            "country": geo["country"],
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "uv_index": uv_index,
+            "spf": spf,
+            "exposure_score": score,
+        },
+    )
+
+    location_label = f"{geo['name']}, {geo['country']}" if geo.get("country") else geo["name"]
+    send_message(
+        chat_id,
+        f"נוסף: session ב{location_label} ({round(duration_minutes)} דקות, UV {uv_index:.1f}). "
+        f"מדד חשיפה: {score}%.",
+    )
+    logger.info("Added manual session for @%s in %s: UV=%s score=%s", username, geo["name"], uv_index, score)
+
+
+# ---------------------------------------------------------------------
 # /my_sessions, /edit_session, /delete_session — ניהול sessions קיימים
 # מתוך הבוט (בלי דשבורד/UI נפרד). נועד גם לתקן session שנתקע (כמו
 # id=38 ש-uv_index=0 שלו גרם ל-ZeroDivisionError בעבר, ראו התיקון של
@@ -700,6 +940,7 @@ def handle_my_sessions(chat_id: int, username: str) -> None:
     lines.append("")
     lines.append("למחיקה: /delete_session <מספר>")
     lines.append("לעריכה: /edit_session <מספר> end=now|HH:MM ו/או spf=<מספר>")
+    lines.append("להוספת session ישן: /add_session <עיר> start=HH:MM end=HH:MM [spf=..]")
     send_message(chat_id, "\n".join(lines))
 
 
@@ -814,6 +1055,7 @@ COMMAND_HANDLERS = {
     "/my_sessions": lambda chat_id, username, args: handle_my_sessions(chat_id, username),
     "/delete_session": handle_delete_session,
     "/edit_session": handle_edit_session,
+    "/add_session": handle_add_session,
 }
 
 
