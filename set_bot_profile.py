@@ -66,6 +66,7 @@ COMMANDS = [
     ("delete_session", "מחיקת session"),
     ("offline_session", "תיעוד session בלי אינטרנט"),
     ("set_skin_type", "הגדרת סוג עור (1-6, סולם Fitzpatrick)"),
+    ("diagnose_skin", "הערכת נזק-שמש מתמונה (לא ייעוץ רפואי)"),
     ("dashboard", "קישור לאזור האישי שלכם"),
 ]
 

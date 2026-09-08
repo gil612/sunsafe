@@ -96,3 +96,24 @@ alter table exposure_log add column if not exists client_uuid text;
 -- מרובים (כל שורה מה-בוט הרגיל, בלי client_uuid, נשארת NULL ותמיד מותרת).
 create unique index if not exists exposure_log_client_uuid_key
     on exposure_log (client_uuid);
+
+
+-- SunSafe — Supabase schema (fourth slice: skin_damage_log ל-/diagnose_skin)
+-- ראו skin_damage_classifier.py לרציונל המלא ולדיון על הסיכון (הוחלט
+-- במפורש עם המשתמש להמשיך, "גרסה מלאה", אחרי שהוצג הסיכון בפרטיות/
+-- אחריות רפואית מסיכום הפגישה). התמונה עצמה **לעולם** לא נשמרת כאן
+-- ולא בשום מקום אחר — רק תוצאת ההערכה הטקסטואלית.
+
+create table if not exists skin_damage_log (
+    id                 bigint generated always as identity primary key,
+    created_at         timestamptz not null default now(),
+    telegram_username  text not null references users(telegram_username),
+    session_id         bigint references exposure_log(id),  -- NULL אם לא נמצא session רלוונטי בזמן הבדיקה
+    severity           text not null check (severity in ('none', 'mild', 'moderate', 'severe')),
+    confidence         text not null check (confidence in ('low', 'medium', 'high')),
+    reasoning          text not null  -- ההסבר החזותי-בלבד מה-מודל, כולל המלצת "פנו לרופא" ב-moderate/severe
+);
+
+alter table skin_damage_log enable row level security;
+-- בלי policies בכוונה — גישה רק דרך service_role (הבוט כותב), אותו
+-- דפוס בדיוק כמו exposure_log/users/magic_links למעלה.

@@ -86,15 +86,47 @@ def make_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+def _extract_usage(response) -> dict | None:
+    """
+    שולף את מספר הטוקנים בפועל (usage_metadata של ה-SDK) מתשובת Gemini —
+    לצורך דיווח-עלות בזמן אמת (ראו handle_skin_type_photo/
+    _notify_admin_token_usage ב-bot_commands.py, ששולחים הודעת Telegram
+    נפרדת ל-ADMIN_CHAT_ID עם המספרים האלה). מוחזר כ-dict רגיל, לא בתוך
+    raw["skin_type"] וכו', כדי לא לערבב טלמטריה עם שדות שהמודל עצמו
+    מחזיר — ראו איך זה נקרא/מנוקה ב-bot_commands.handle_skin_type_photo.
+
+    best-effort בכוונה: usage_metadata הוא attribute של ה-SDK, לא חלק
+    מה-JSON schema שאנחנו שולטים בו — אם המבנה חסר/משתנה בין גרסאות
+    SDK, מעדיפים לוותר על הדיווח (מחזירים None) מאשר להפיל את כל קריאת
+    הסיווג בגלל טלמטריה צדדית.
+    """
+    usage = getattr(response, "usage_metadata", None)
+    if usage is None:
+        return None
+    try:
+        return {
+            "prompt_tokens": usage.prompt_token_count,
+            "output_tokens": usage.candidates_token_count,
+            "total_tokens": usage.total_token_count,
+        }
+    except AttributeError:
+        return None
+
+
 def classify_skin_type_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     """
     שולח תמונה בודדת ל-Gemini ומחזיר את ה-JSON הגולמי (dict) לפי
-    SKIN_TYPE_RESPONSE_SCHEMA. אין כאן שום כתיבה ל-DB ואין שמירה של
+    SKIN_TYPE_RESPONSE_SCHEMA, בתוספת מפתח "_usage" (dict עם
+    prompt_tokens/output_tokens/total_tokens, או None אם לא זמין) —
+    ראו _extract_usage למעלה. אין כאן שום כתיבה ל-DB ואין שמירה של
     התמונה — הבייטים משמשים רק לקריאה הזו ונזרקים מיד אחריה.
 
     מחזיר את הפלט הגולמי מהמודל בלבד — **חובה** להעביר דרך
     validate_classification לפני שימוש בפועל (לא סומכים עיוור על
-    Structured Output, גם עם schema אכוף).
+    Structured Output, גם עם schema אכוף). validate_classification
+    מתעלמת ממפתח "_usage" (לא ברשימת השדות שהיא קוראת) — קוראי הפונקציה
+    הזו אמורים לחלץ אותו (raw.pop("_usage", None)) לפני/אחרי הוולידציה,
+    לפי הצורך.
     """
     client = make_client()
     response = client.models.generate_content(
@@ -109,6 +141,7 @@ def classify_skin_type_from_image(image_bytes: bytes, mime_type: str = "image/jp
         ),
     )
     raw = json.loads(response.text)
+    raw["_usage"] = _extract_usage(response)
     logger.info("classify_skin_type_from_image -> %s", raw)
     return raw
 

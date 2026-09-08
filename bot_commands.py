@@ -28,6 +28,10 @@ import httpx
 from dotenv import load_dotenv
 
 from skin_type_classifier import classify_skin_type_from_image, validate_classification
+from skin_damage_classifier import (
+    classify_skin_damage_from_image,
+    validate_classification as validate_damage_classification,
+)
 from supabase_client import SupabaseError, delete_rows, insert_row, select_rows, update_rows, upsert_row
 
 load_dotenv()
@@ -47,6 +51,14 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+# chat_id פרטי (לא של משתמש קצה) לדיווחי-טלמטריה פנימיים בלבד — כרגע רק
+# דיווח טוקנים שנוצלו בכל תמונה שמסווגים (ראו _notify_admin_token_usage
+# למטה). אופציונלי במכוון (os.environ.get, לא os.environ[...] כמו
+# BOT_TOKEN): זו תכונת-נחמד-להיות-לי, לא חובה לפעולת הבוט — אם לא
+# מוגדר, פשוט מדלגים על השליחה בלי לקרוס. כדי לקבל chat_id שלכם: שלחו
+# הודעה כלשהי לבוט ואז ראו את chat_id בטבלת users (עמודת chat_id) מול
+# ה-telegram_username שלכם.
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 DASHBOARD_BASE_URL = os.environ.get("DASHBOARD_BASE_URL", "http://localhost:8080")
 # ה-Mini App לתיעוד session אופליין (docs/session/index.html). ברירת
 # מחדל localhost כדי לא לשבור בדיקות מקומיות, בדיוק כמו DASHBOARD_BASE_URL.
@@ -268,6 +280,39 @@ def download_telegram_photo(client: httpx.Client, file_id: str) -> bytes:
 
 
 # ---------------------------------------------------------------------
+# דיווח טוקנים ל-admin — לא ל-webhook נפרד (הבוט כבר מגיב מיידית לכל
+# תמונה נכנסת דרך לולאת ה-polling עצמה, ראו handle_update למטה), אלא
+# הודעת Telegram נוספת שנשלחת רק ל-ADMIN_CHAT_ID (לא למשתמש שהעלה את
+# התמונה) בכל פעם שמתבצעת קריאת Gemini לסיווג תמונת-עור, כדי לעקוב אחרי
+# עלות בזמן אמת. ראו _extract_usage ב-skin_type_classifier.py /
+# skin_damage_classifier.py למקור המספרים.
+# ---------------------------------------------------------------------
+def _notify_admin_token_usage(feature: str, username: str, usage: dict | None) -> None:
+    """
+    best-effort בלבד, בכוונה: אם ADMIN_CHAT_ID לא מוגדר, אם ל-usage אין
+    ערך (למשל ה-SDK לא החזיר usage_metadata), או אם השליחה עצמה נכשלת
+    (Telegram API) — רק רושמים ללוג ולא זורקים. זו טלמטריה צדדית; אסור
+    לה לשבש את התשובה שכבר נשלחה למשתמש עצמו (ולכן נקראת רק אחרי
+    שהתקבלה תשובה תקינה מ-Gemini, לא בתוך אותו try/except שמטפל בכשל
+    הסיווג עצמו).
+    """
+    if not ADMIN_CHAT_ID:
+        logger.debug("ADMIN_CHAT_ID not set — skipping token-usage admin notification")
+        return
+    if not usage:
+        logger.debug("No usage metadata available for %s/@%s — skipping admin notification", feature, username)
+        return
+    try:
+        send_message(
+            ADMIN_CHAT_ID,
+            f"📊 {feature} | @{username} | טוקנים: קלט={usage.get('prompt_tokens')}, "
+            f"פלט={usage.get('output_tokens')}, סה\"כ={usage.get('total_tokens')}",
+        )
+    except Exception as e:
+        logger.warning("Failed to send admin token-usage notification (%s/@%s): %s", feature, username, e)
+
+
+# ---------------------------------------------------------------------
 # תמונה נכנסת — הצעת סוג עור (Fitzpatrick) בלבד, לא כתיבה ל-DB
 # ---------------------------------------------------------------------
 def handle_skin_type_photo(chat_id: int, username: str, photo_file_id: str) -> None:
@@ -292,6 +337,7 @@ def handle_skin_type_photo(chat_id: int, username: str, photo_file_id: str) -> N
         )
         return
 
+    _notify_admin_token_usage("skin_type", username, raw.pop("_usage", None))
     result = validate_classification(raw)
     if not result["ok"]:
         send_message(
@@ -311,6 +357,109 @@ def handle_skin_type_photo(chat_id: int, username: str, photo_file_id: str) -> N
         "או מספר אחר אם זה לא מדויק.",
     )
     logger.info("Photo skin-type suggestion for @%s: %s", username, result)
+
+
+# ---------------------------------------------------------------------
+# /diagnose_skin — הערכת נזק-שמש מתמונה, אחרי חשיפה
+# ---------------------------------------------------------------------
+# הבוט הזה חסר state-tracking אמיתי (כל handler בודד/stateless, נשען
+# על ה-DB) — אין שום דרך קיימת "לזכור" בין הודעה להודעה. תמונה נכנסת
+# הייתה עד עכשיו תמיד מנותבת ל-handle_skin_type_photo (ראו handle_update
+# למטה). כדי ש-/diagnose_skin יוכל "לתפוס" את התמונה הבאה של המשתמש
+# בלי לשבור את זה, יש כאן דגל pending קטן בזיכרון בלבד (לא ב-DB —
+# זה מצב שיחה חולף בסדר גודל של דקות, לא נתון עסקי שצריך לשרוד
+# restart של ה-process; אם ה-Space נופל/קם בדיוק בין הפקודה לתמונה,
+# המשתמש פשוט חוזר להתנהגות ברירת המחדל הקיימת — הצעת סוג עור, לא
+# קריסה). תוקף קצר (10 דקות) כדי שדגל ישן לא "יתפוס" תמונה לא קשורה
+# ששולחים הרבה יותר מאוחר.
+_PENDING_DIAGNOSE_SKIN_TTL_MINUTES = 10
+_pending_diagnose_skin: dict[str, datetime] = {}
+
+
+def handle_diagnose_skin(chat_id: int, username: str, args: str) -> None:
+    _pending_diagnose_skin[username] = datetime.now(timezone.utc) + timedelta(
+        minutes=_PENDING_DIAGNOSE_SKIN_TTL_MINUTES
+    )
+    send_message(
+        chat_id,
+        "☀️ שלחו עכשיו תמונה ברורה של האזור בעור שנחשף לשמש (התמונה משמשת "
+        "רק להערכה הזו ולא נשמרת בשום מקום).\n\n"
+        "⚠️ חשוב: זו הערכה חזותית של בינה מלאכותית בלבד — לא אבחנה רפואית "
+        "ולא תחליף לרופא. אם משהו מדאיג אתכם (כאב חזק, שלפוחיות, חום), "
+        "פנו לרופא/מיון גם בלי לחכות לתשובה כאן.",
+    )
+
+
+def _most_recent_session_id(username: str) -> int | None:
+    """session_id לקישור תוצאת האבחון (open או closed, הכי עדכני) — או None אם אין בכלל."""
+    sessions = select_rows(
+        "exposure_log",
+        {"telegram_username": f"eq.{username}", "order": "start_time.desc", "limit": "1"},
+    )
+    return sessions[0]["id"] if sessions else None
+
+
+def handle_skin_damage_photo(chat_id: int, username: str, photo_file_id: str) -> None:
+    """
+    מוריד תמונה שנשלחה כתגובה ל-/diagnose_skin, שולח אותה ל-Gemini
+    להערכת חומרת נזק-שמש (ראו skin_damage_classifier.py), שולח למשתמש
+    תשובה עם ניסוח זהיר (לא ייעוץ רפואי; המלצה מפורשת לפנות לרופא
+    ב-moderate/severe), וכותב שורת תוצאה ל-skin_damage_log — התמונה
+    עצמה נזרקת מיד אחרי הקריאה ל-Gemini, לא נשמרת בשום מקום.
+    """
+    with httpx.Client() as client:
+        photo_bytes = download_telegram_photo(client, photo_file_id)
+
+    try:
+        raw = classify_skin_damage_from_image(photo_bytes)
+    except Exception as e:
+        logger.warning("classify_skin_damage_from_image failed for @%s: %s", username, e)
+        send_message(chat_id, "לא הצלחתי לנתח את התמונה כרגע. נסו שוב עם /diagnose_skin.")
+        return
+
+    _notify_admin_token_usage("diagnose_skin", username, raw.pop("_usage", None))
+    result = validate_damage_classification(raw)
+    if not result["ok"]:
+        send_message(
+            chat_id,
+            f"לא הצלחתי להעריך את התמונה הזו ({result['reason']}). נסו תמונה "
+            "ברורה יותר של האזור עם /diagnose_skin.",
+        )
+        logger.info("Photo skin-damage classification rejected for @%s: %s", username, result)
+        return
+
+    severity = result["severity"]
+    severity_labels = {
+        "none": "לא נראים סימני נזק",
+        "mild": "אודם קל",
+        "moderate": "אודם משמעותי",
+        "severe": "אודם עז / חשד לכוויה משמעותית",
+    }
+    lines = [f"הערכה: {severity_labels[severity]} (ביטחון: {result['confidence']}).", result["reasoning"]]
+    if severity in ("moderate", "severe"):
+        lines.append(
+            "⚠️ מומלץ לפנות לרופא/מיון, בייחוד אם יש שלפוחיות, חום, או הרגשה רעה כללית."
+        )
+    lines.append("\nתזכורת: זו הערכה חזותית של בינה מלאכותית בלבד, לא אבחנה רפואית.")
+    send_message(chat_id, "\n".join(lines))
+
+    try:
+        insert_row(
+            "skin_damage_log",
+            {
+                "telegram_username": username,
+                "session_id": _most_recent_session_id(username),
+                "severity": severity,
+                "confidence": result["confidence"],
+                "reasoning": result["reasoning"],
+            },
+        )
+    except SupabaseError as e:
+        # התשובה כבר נשלחה למשתמש — כשל בשמירה ללוג/היסטוריה לא אמור
+        # לגרום להודעת שגיאה נוספת שרק תבלבל (התוצאה עצמה כבר נמסרה).
+        logger.error("Failed to save skin_damage_log for @%s: %s", username, e)
+
+    logger.info("Skin-damage assessment for @%s: %s", username, result)
 
 
 # ---------------------------------------------------------------------
@@ -482,13 +631,81 @@ def fetch_uv_forecast_next_24h(
     return list(window_times), list(window_uvs)
 
 
+def _build_uv_risk_cmap(y_max: float):
+    """
+    Colormap רציף (ירוק->צהוב->כתום->אדום) שממופה על טווח [0, y_max],
+    עם עוגנים באותם ספים בדיוק כמו WHO/פלטת הסטטוס של SunSafe (good/
+    warning/serious/critical ב-3/6/8). "רציף" בכוונה — לא 4 פסים
+    שטוחים: ראו ה-docstring של render_uv_forecast_chart להסבר למה.
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+
+    stops_raw = [
+        (0, STATUS_COLORS["good"]),
+        (3, STATUS_COLORS["warning"]),
+        (6, STATUS_COLORS["serious"]),
+        (8, STATUS_COLORS["critical"]),
+    ]
+    positions: list[float] = []
+    colors: list[str] = []
+    last_pos = -1.0
+    for value, color in stops_raw:
+        pos = min(value / y_max, 1.0)
+        if pos <= last_pos:  # y_max קטן מדי כדי להכיל את כל הספים (למשל UV אפסי) -> מדלגים על כפילויות
+            continue
+        positions.append(pos)
+        colors.append(color)
+        last_pos = pos
+    if positions[0] > 0:
+        positions.insert(0, 0.0)
+        colors.insert(0, colors[0])
+    if positions[-1] < 1.0:
+        positions.append(1.0)
+        colors.append(colors[-1])
+    return LinearSegmentedColormap.from_list("uv_risk", list(zip(positions, colors)))
+
+
+STATUS_COLORS = {
+    "good": "#0ca30c",
+    "warning": "#fab219",
+    "serious": "#ec835a",
+    "critical": "#d03b3b",
+}
+
+
 def render_uv_forecast_chart(hourly_times: list[str], hourly_uv: list[float], city_name: str) -> bytes:
     """
-    מרנדר תרשים עמודות PNG (matplotlib, in-memory — io.BytesIO, בלי כתיבה
-    לדיסק) של תחזית UV להמשך היום. צבע כל עמודה לפי דרגת UV Index (תקן
-    WHO: Low/Moderate/High/Very High) וממופה לפלטת הסטטוס הקיימת של
-    SunSafe (--status-good/warning/serious/critical, ראו deploy_staging
-    /index.html) — כדי שהצבעים יהיו עקביים עם שאר האפליקציה.
+    מרנדר תרשים PNG (matplotlib, in-memory — io.BytesIO, בלי כתיבה לדיסק)
+    של תחזית UV ל-24 השעות הבאות: שטח אחד רציף מתחת לקו, עם גרדיאנט
+    צבע רציף (ירוק->צהוב->כתום->אדום) שמשקף את רמת ה-UV באותה שעה —
+    לא 4 פסים שטוחים/חתוכים.
+
+    זו הגרסה הרביעית אחרי סבב משוב מהמשתמש (כולם על אותו ציר-זמן,
+    שלא השתנה מהתחלה): 1) עמודות צבעוניות -> נדחה ("אני לא אוהב את
+    העמודות... עדיף פיתרון ויזואלי אחר"); 2) קו + שטח חתוך ל-4 פסי
+    WHO -> אושר על הדוגמה ששלחתי ("אני מעוניין בכזה"); 3) המשתמש ביקש
+    "שכל השטח מתחת יהיה זהה" -> הוחלף ל-צבע אחיד שטוח לכל השטח; 4)
+    המשתמש ביקש שעדיין "יהיה רלוונטי לשעה" / "שהצבע... יהיה רלוונטי
+    לשעה" -> צבע שטוח אחד לא הספיק (לא נושא מידע על השעה) אבל גם לא
+    לחזור ל-4 פסים חתוכים ("זהה" מרמז על שטח אחד רציף) — הפתרון: שטח
+    רציף אחד (לא מחולק ל-blocks) שהצבע *בתוכו* זורם באופן חלק לפי
+    ערך ה-UV של אותה שעה. ממומש ע"י imshow עם גרדיאנט אופקי (עמודה
+    לכל שעה, צבועה לפי hourly_uv[i] דרך _build_uv_risk_cmap), עם
+    interpolation="bilinear" לבלנד חלק בין שעות סמוכות, clipped
+    לפוליגון "מתחת לעקומה" (מ-fill_between עם color="none", רק בשביל
+    ה-Path שלו) — כך שהצבע נשאר בתחום שמתחת לקו, לא מלבן מלא.
+
+    הכותרת כוללת את שם העיר (city_name), מוכנס כמו שהוא ל-title בלי
+    שום עיבוד bidi. היסטוריה שכדאי לתעד כאן כי היא לא אינטואיטיבית:
+    ניסינו לעטוף עם get_display() של python-bidi (ה"תיקון" המקובל
+    ל-Hebrew-in-matplotlib), המשתמש חשד שזה הפוך, בדקנו עם השוואת A/B
+    מפורשת (עם get_display מול בלי) ובהתחלה אישר את הגרסה עם
+    get_display כנכונה — אבל כשזה נבדק מול מה שבאמת מוצג בבוט החי,
+    המשתמש קבע במפורש: "אני מעוניין בפיתרון של שורה עליונה" — כלומר
+    הגרסה *בלי* עיבוד bidi (Option A) היא הנכונה בפועל אצלו, למרות
+    שזה סותר את התיעוד הכללי על matplotlib+RTL. לא לשנות את זה שוב
+    בלי אימות ישיר מול תוצאה אמיתית מהבוט החי (לא רק תמונת-השוואה).
+
     import מקומי (לא בראש הקובץ) בכוונה: אם matplotlib חסר בסביבת
     ה-deploy, רק הפיצ'ר הזה נכשל (ונתפס ב-send_uv_forecast_chart) —
     שאר הבוט (כולל /start_session עצמו) ממשיך לעבוד כרגיל.
@@ -496,62 +713,63 @@ def render_uv_forecast_chart(hourly_times: list[str], hourly_uv: list[float], ci
     import matplotlib
     matplotlib.use("Agg")  # רינדור ל-buffer בלבד, בלי חלון/תצוגה — נדרש בסביבת שרת
     import matplotlib.pyplot as plt
-
-    STATUS_COLORS = {
-        "good": "#0ca30c",
-        "warning": "#fab219",
-        "serious": "#ec835a",
-        "critical": "#d03b3b",
-    }
-
-    def status_for_uv(uv: float) -> str:
-        # דרגות UV Index רשמיות של WHO (Low 0-2 / Moderate 3-5 / High 6-7 /
-        # Very High+Extreme 8+), מכווצות לארבע רמות הסטטוס הקיימות באפליקציה.
-        if uv < 3:
-            return "good"
-        if uv < 6:
-            return "warning"
-        if uv < 8:
-            return "serious"
-        return "critical"
+    import numpy as np
+    from matplotlib.colors import Normalize
 
     hours = [datetime.fromisoformat(t).strftime("%H:%M") for t in hourly_times]
-    colors = [STATUS_COLORS[status_for_uv(uv)] for uv in hourly_uv]
+    x = list(range(len(hours)))
+    # תקרה ל-y: קצת מעל השיא, אבל לפחות 3 (כדי שהגרף לא יהיה שטוח
+    # לגמרי גם בימים עם UV אפסי, למשל session שנפתח בלילה).
+    y_max = max(max(hourly_uv, default=0) * 1.15, 3)
 
     fig, ax = plt.subplots(figsize=(11, 4.5), dpi=150)
-    bars = ax.bar(hours, hourly_uv, color=colors, width=0.65, zorder=3)
 
-    ax.set_title("UV Forecast — Next 24 Hours", fontsize=13, pad=12)
+    # פוליגון "מתחת לעקומה" — בלי צבע משלו (color="none"), רק כדי
+    # לקחת ממנו את ה-Path ולהשתמש בו כ-clip mask לגרדיאנט למטה.
+    invisible_fill = ax.fill_between(x, 0, hourly_uv, color="none")
+    area_under_curve = invisible_fill.get_paths()[0]
+
+    # גרדיאנט אופקי — עמודה אחת לכל שעה, צבועה לפי ה-UV של אותה שעה,
+    # עם בלנד חלק בין שעות (bilinear). clipped לשטח שמתחת לקו בלבד.
+    if x:
+        cmap = _build_uv_risk_cmap(y_max)
+        gradient = np.array(hourly_uv, dtype=float).reshape(1, -1)
+        image = ax.imshow(
+            gradient, extent=[x[0] - 0.5, x[-1] + 0.5, 0, y_max], origin="lower",
+            aspect="auto", cmap=cmap, norm=Normalize(vmin=0, vmax=y_max),
+            interpolation="bilinear", alpha=0.6, zorder=2,
+        )
+        image.set_clip_path(area_under_curve, transform=ax.transData)
+
+    # הקו עצמו — צבע ניטרלי כהה, שיבלוט מעל הגרדיאנט; marker בכל שעה
+    # כדי ש-24 נקודות הנתונים יישארו קריאות.
+    ax.plot(
+        x, hourly_uv, color="#2b2b2b", linewidth=2,
+        marker="o", markersize=4, markerfacecolor="#2b2b2b", zorder=3,
+    )
+
+    ax.set_title(f"UV Forecast — {city_name} — Next 24 Hours", fontsize=13, pad=12)
     ax.set_ylabel("UV Index")
-    ax.set_ylim(bottom=0)
+    ax.set_ylim(0, y_max)
+    if x:
+        ax.set_xlim(-0.5, len(x) - 0.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels(hours, rotation=60, ha="right", fontsize=7)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.grid(axis="y", color="#e5e5e5", linewidth=0.8, zorder=0)
+    ax.grid(axis="y", color="#e5e5e5", linewidth=0.8, zorder=1)
     ax.set_axisbelow(True)
-    plt.xticks(rotation=60, ha="right", fontsize=7)
 
-    # תווית ישירה רק על שיא ה-UV (הערך הכי שימושי, לא על כל 24 העמודות —
+    # תווית ישירה רק על שיא ה-UV (הערך הכי שימושי, לא על כל 24 השעות —
     # זה היה עמוס מדי לקריאה). ראו dataviz skill: "selective direct labels".
     if hourly_uv:
         peak_idx = max(range(len(hourly_uv)), key=lambda i: hourly_uv[i])
-        peak_bar = bars[peak_idx]
         ax.annotate(
             f"peak {hourly_uv[peak_idx]:.1f}",
-            (peak_bar.get_x() + peak_bar.get_width() / 2, peak_bar.get_height()),
-            textcoords="offset points", xytext=(0, 4),
-            ha="center", fontsize=8, color="#333333", fontweight="bold",
+            (peak_idx, hourly_uv[peak_idx]),
+            textcoords="offset points", xytext=(0, 8),
+            ha="center", fontsize=8, color="#333333", fontweight="bold", zorder=4,
         )
-
-    legend_handles = [
-        plt.Rectangle((0, 0), 1, 1, color=color, label=label)
-        for label, color in [
-            ("Low", STATUS_COLORS["good"]),
-            ("Moderate", STATUS_COLORS["warning"]),
-            ("High", STATUS_COLORS["serious"]),
-            ("Very High", STATUS_COLORS["critical"]),
-        ]
-    ]
-    ax.legend(handles=legend_handles, loc="upper right", fontsize=7, frameon=False)
 
     fig.tight_layout()
     buf = io.BytesIO()
@@ -1056,6 +1274,7 @@ COMMAND_HANDLERS = {
     "/delete_session": handle_delete_session,
     "/edit_session": handle_edit_session,
     "/add_session": handle_add_session,
+    "/diagnose_skin": handle_diagnose_skin,
 }
 
 
@@ -1091,7 +1310,14 @@ def handle_update(update: dict) -> None:
 
     if photo_sizes:
         largest_photo = photo_sizes[-1]
-        handle_skin_type_photo(chat_id, username, largest_photo["file_id"])
+        # /diagnose_skin "תופס" את התמונה הבאה (בתוך חלון הזמן), אחרת
+        # ברירת המחדל הקיימת נשארת — הצעת סוג עור. ראו ההערה מעל
+        # _pending_diagnose_skin להסבר המלא על הבחירה הזו.
+        expires_at = _pending_diagnose_skin.pop(username, None)
+        if expires_at is not None and datetime.now(timezone.utc) < expires_at:
+            handle_skin_damage_photo(chat_id, username, largest_photo["file_id"])
+        else:
+            handle_skin_type_photo(chat_id, username, largest_photo["file_id"])
         return
 
     if location:
