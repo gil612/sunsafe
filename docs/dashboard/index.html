@@ -163,12 +163,20 @@
      לבר-צ'ארטים אפילו בתוך ממשק RTL. */
   .chart-wrap { margin-top: 20px; }
   .hbars { display: flex; flex-direction: column; }
+  /* כניסה מדורגת: כל שורה דוהה+גולשת פנימה, והפס שלה גדל בו-זמנית
+     משמאל-לימין (ראו transition-delay שנקבע מה-JS לפי הדירוג) — "אפקטים"
+     שביקש המשתמש (2026-09-09), בנוסף לגדילה הכיוונית שכבר הייתה קיימת. */
   .hbar-row {
     display: flex; flex-direction: column; gap: 5px;
-    padding: 10px 0; border-bottom: 1px solid var(--gridline);
+    padding: 10px; margin: 0 -10px; border-radius: 8px;
+    border-bottom: 1px solid var(--gridline);
     position: relative; cursor: default;
+    opacity: 0; transform: translateY(6px);
+    transition: opacity .5s ease, transform .5s ease, background .15s ease;
   }
+  .hbar-row.in-view { opacity: 1; transform: translateY(0); }
   .hbar-row:last-child { border-bottom: none; }
+  .hbar-row:hover { background: var(--page); }
   .hbar-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
   .hbar-label {
     font-size: 12.5px; color: var(--text-secondary);
@@ -196,6 +204,9 @@
     content: "100%"; position: absolute; top: -16px; inset-inline-start: 0;
     transform: translateX(-50%); font-size: 9.5px; color: var(--text-muted);
     white-space: nowrap;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hbar-row, .hbar-fill { transition: none !important; }
   }
 
   .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 18px; font-size: 12px; color: var(--text-secondary); }
@@ -654,9 +665,13 @@
       const status = scoreToStatus(score);
       const widthPct = Math.min(100, (score / maxScore) * 100);
       const thresholdPct = Math.min(100, (100 / maxScore) * 100);
+      // עיכוב מדורג לפי דירוג — עד 8 שורות ראשונות "נכנסות" בזו-אחר-זו,
+      // מעבר לזה כולן מתחילות יחד כדי שרשימה ארוכה לא תיגמר לאט מדי.
+      const delayMs = Math.min(rank, 8) * 70;
 
       const row = document.createElement("div");
       row.className = "hbar-row";
+      row.style.transitionDelay = `${delayMs}ms`;
       row.innerHTML = `
         <div class="tooltip">
           ${s.city} · ${s.start}–${s.end}<br>
@@ -667,11 +682,23 @@
           <span class="hbar-value" style="color:${STATUS[status].color}">${score}%</span>
         </div>
         <div class="hbar-track">
-          <div class="hbar-fill" style="width:${widthPct}%; background:${STATUS[status].color};"></div>
+          <div class="hbar-fill" style="width:0%; background:${STATUS[status].color}; transition-delay:${delayMs}ms;" data-target-width="${widthPct}"></div>
           ${thresholdPct < 100 ? `<div class="hbar-threshold" style="inset-inline-start:${thresholdPct}%"></div>` : ""}
         </div>
       `;
       barsContainer.appendChild(row);
+    });
+
+    // --- הפעלת אנימציית הכניסה: שתי requestAnimationFrame כדי לוודא שהדפדפן
+    // "צייר" קודם את מצב ה-0% (opacity/width), אחרת שינוי ה-style הראשוני לא
+    // ייתפס כ-transition והשורות/הפסים יקפצו ישר לערך הסופי בלי אנימציה. ---
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        barsContainer.querySelectorAll(".hbar-row").forEach(row => row.classList.add("in-view"));
+        barsContainer.querySelectorAll(".hbar-fill").forEach(fill => {
+          fill.style.width = fill.dataset.targetWidth + "%";
+        });
+      });
     });
 
     // --- Legend ---
