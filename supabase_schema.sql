@@ -117,3 +117,24 @@ create table if not exists skin_damage_log (
 alter table skin_damage_log enable row level security;
 -- בלי policies בכוונה — גישה רק דרך service_role (הבוט כותב), אותו
 -- דפוס בדיוק כמו exposure_log/users/magic_links למעלה.
+
+
+-- SunSafe — Supabase schema (fifth slice: lat/lon ב-exposure_log,
+-- תיקון "דגימת UV בודדת" — 2026-09-08)
+--
+-- באג אמיתי: /start_session+/end_session (וגם /add_session ו-Mini App
+-- האופליין) שמרו UV Index אחד בלבד (בזמן תחילת ה-session) והחילו אותו
+-- על כל משך ה-session, ללא קשר לאורכו. עבור session ארוך (למשל 11 שעות
+-- במצפה רמון) זה נתן תוצאה שגויה לגמרי — UV=0.0 (דגימה שנפלה על שעת
+-- לילה) במקום שיא אמיתי מעל 7 בצהריים. התיקון: /end_session שולף מחדש
+-- ממוצע-UV משוקלל-משך על פני כל טווח [start_time, end_time] בפועל
+-- (ראו weighted_average_uv / fetch_historical_uv ב-bot_commands.py) —
+-- וכדי לעשות זאת צריך את ה-lat/lon שנשמרו בתחילת ה-session, שלא היו
+-- קיימים בשורה בכלל עד כה.
+--
+-- nullable בכוונה: שורות היסטוריות (לפני ה-migration הזה) יישארו בלי
+-- lat/lon ולא ניתן לתקן אותן רטרואקטיבית — /end_session נופל בחזרה
+-- בבטחה לדגימה המקורית כש-lat/lon חסרים (ראו הערה ב-handle_end_session).
+
+alter table exposure_log add column if not exists lat double precision;
+alter table exposure_log add column if not exists lon double precision;

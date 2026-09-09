@@ -75,6 +75,14 @@ GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 # User-Agent מזהה ומקסימום בקשה/שנייה לפי ה-Usage Policy הרשמי — לא
 # בעיה בפועל כאן כי יש לכל היותר קריאה אחת לכל /start_session.
 NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+# Forward geocoding — שכבת גיבוי ל-geocode_city (ראו שם) כשל-Open-Meteo/
+# GeoNames אין בכלל רשומת-שם בעברית לעיר (לא רק שגיאת איות: "סן חוזה"
+# ו"סן חוסה" - שתי הצורות - נכשלו שתיהן ב-Open-Meteo ב-2026-09-08).
+# OpenStreetMap הוא מאגר קהילתי גדול משמעותית מ-GeoNames, עם כיסוי
+# שמות רב-לשוני עשיר יותר לערים זרות פחות-מוכרות — לא הבטחה, רק כיסוי
+# רחב יותר. עדיין בלי תיקון-טעויות-הקלדה אמיתי (edit distance) כמו
+# Google — זה נשאר מחוץ לתקציב של הפרויקט (ראה השיחה מ-2026-09-08).
+NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_USER_AGENT = "SunSafe-Bot/1.0 (student course project)"
 
 LINK_TTL_MINUTES = 60 * 24  # 24 שעות — נוח לשימוש חוזר בלי לוותר על תפוגה
@@ -104,6 +112,60 @@ def calculate_exposure_score(uv_index: float, duration_minutes: float, skin_type
     protection = effective_spf(spf)
     safe_minutes = (200 / uv_index) * factor * protection
     return round((duration_minutes / safe_minutes) * 100)
+
+
+# ---------------------------------------------------------------------
+# /today — אנליזה יומית + "מה היה קורה עם קרם הגנה" (ראו handle_today
+# למטה). קבוע, לא ניתן להגדרה ע"י המשתמש כרגע — הוחלט במפורש עם המשתמש
+# ב-2026-09-08 (SPF 30 קבוע כברירת מחדל, לא פרמטר פתוח) כדי לשמור על
+# MVP פשוט: השוואה אחידה, בלי צורך לפרש קלט חופשי.
+# ---------------------------------------------------------------------
+DAILY_SUMMARY_REFERENCE_SPF = 30
+
+
+def _sessions_on_date(sessions: list[dict], target_date) -> list[dict]:
+    """
+    מסנן sessions לאלה שה-start_time שלהם (UTC, כמו כל שאר הזמנים באפליקציה)
+    נופל בדיוק על target_date. פונקציה טהורה — בלי DB, קלה לבדיקה בנפרד
+    מ-handle_today.
+    """
+    return [s for s in sessions if datetime.fromisoformat(s["start_time"]).date() == target_date]
+
+
+def _daily_session_summary(session: dict, skin_type: int | None, reference_spf: int) -> dict:
+    """
+    עבור session סגור בודד (יש לו end_time+exposure_score): מחזירה dict
+    עם הציון בפועל לצד ציון היפותטי אילו נעשה שימוש ב-reference_spf קבוע
+    לאורך כל ה-session, במקום ה-spf שבאמת נרשם (כולל None). פונקציה
+    טהורה — משתמשת רק ב-calculate_exposure_score הקיים, לא נוגעת ב-DB.
+    """
+    start_dt = datetime.fromisoformat(session["start_time"])
+    end_dt = datetime.fromisoformat(session["end_time"])
+    duration_minutes = (end_dt - start_dt).total_seconds() / 60
+    hypothetical_score = calculate_exposure_score(session["uv_index"], duration_minutes, skin_type, reference_spf)
+    return {
+        "id": session["id"],
+        "city": session["city"],
+        "spf": session.get("spf"),
+        "actual_score": session["exposure_score"],
+        "hypothetical_score": hypothetical_score,
+    }
+
+
+def _peak_exposure_session(sessions: list[dict]) -> dict | None:
+    """
+    מחזירה את ה-session (מבין אלה עם exposure_score, כלומר סגורים) עם
+    מדד החשיפה הגבוה ביותר, או None אם אין אף session סגור — "המיקום
+    איפה שמד החשיפה היה הגבוה ביותר" (הוחלט עם המשתמש ב-2026-09-08).
+    פונקציה טהורה, קלה לבדיקה בנפרד — משמשת גם את handle_today (שורת
+    טקסט) וגם את render_daily_exposure_chart/send_daily_exposure_chart
+    (הדגשה חזותית + כיתוב על הגרף). session פתוח (exposure_score=None)
+    לא נכלל — אין לו עדיין ציון להשוות.
+    """
+    closed = [s for s in sessions if s.get("exposure_score") is not None]
+    if not closed:
+        return None
+    return max(closed, key=lambda s: s["exposure_score"])
 
 
 # ---------------------------------------------------------------------
@@ -144,6 +206,49 @@ def _text_matches(hint: str, value: str | None) -> bool:
     return bool(hint_n) and (hint_n in value_n or value_n in hint_n)
 
 
+def _nominatim_forward_geocode(client: httpx.Client, city_name: str) -> dict:
+    """
+    שכבת גיבוי ל-geocode_city (למטה) — נקראת רק אחרי ש-Open-Meteo/
+    GeoNames נכשל לגמרי (גם התאמה ישירה וגם כל פיצול עיר/מדינה). מריצה
+    חיפוש טקסט-חופשי (q=) מול Nominatim, שם המחרוזת כולה (כולל ציון-
+    מדינה אם יש, למשל "סן חוסה קוסטה ריקה") נכנסת כמו שהיא — Nominatim
+    כבר יודע לפרש "עיר, מדינה" בעצמו, אז אין צורך בלוגיקת הפיצול
+    שקיימת למעלה בשביל Open-Meteo.
+
+    לא זורקת אם אין תוצאות/כתובת — מחזירה found=False, אותו חוזה בדיוק
+    כמו geocode_city ו-reverse_geocode_location.
+    """
+    response = client.get(
+        NOMINATIM_SEARCH_URL,
+        params={"q": city_name, "format": "json", "accept-language": "he", "limit": 1, "addressdetails": 1},
+        headers={"User-Agent": NOMINATIM_USER_AGENT},
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    results = response.json() or []
+    if not results:
+        return {"found": False}
+
+    result = results[0]
+    address = result.get("address") or {}
+    name = (
+        address.get("city")
+        or address.get("town")
+        or address.get("village")
+        or address.get("municipality")
+        or address.get("county")
+        or result.get("name")
+    )
+    try:
+        latitude, longitude = float(result["lat"]), float(result["lon"])
+    except (KeyError, TypeError, ValueError):
+        return {"found": False}
+    if not name:
+        return {"found": False}
+
+    return {"found": True, "name": name, "country": address.get("country"), "latitude": latitude, "longitude": longitude}
+
+
 def geocode_city(client: httpx.Client, city_name: str) -> dict:
     """
     מזהה עיר לפי שם חופשי. קודם מנסים את המחרוזת המלאה כמו שהיא — המקרה
@@ -154,7 +259,18 @@ def geocode_city(client: httpx.Client, city_name: str) -> dict:
     נפרד, אז מפצלים את המחרוזת לחלק-עיר וחלק-מדינה (1 עד 3 המילים
     האחרונות — מכסה גם מדינות דו-מילתיות כמו "קוסטה ריקה"), שולפים כמה
     מועמדים לחלק-העיר, ובודקים איזה מהם ה-country שלו תואם את חלק-המדינה.
-    בלי התאמה בשום פיצול — "לא נמצא", בלי לנחש עיר שגויה בשקט.
+
+    אם גם זה נכשל — לפני שמוותרים לגמרי, מנסים Nominatim
+    (_nominatim_forward_geocode) כשכבה שלישית: מקרה אמיתי שנתקלנו בו
+    ב-2026-09-08 — "סן חוסה קוסטה ריקה" (וגם האיות "סן חוזה") לא נמצא
+    ב-Open-Meteo/GeoNames בשום איות ובשום פיצול, כי ל-GeoNames פשוט אין
+    בכלל שם עברי רשום לעיר הזו (לא רק בעיית-איות — Open-Meteo לא עושה
+    שום fuzzy/typo matching, בשונה מ-Google). Nominatim (OpenStreetMap,
+    כבר בשימוש כאן ל-reverse_geocode_location) הוא מאגר קהילתי גדול
+    יותר עם כיסוי רב-לשוני עשיר יותר — לא הבטחה לכל עיר, אבל שכבת גיבוי
+    חינמית וסבירה לפני "לא נמצא".
+
+    בלי התאמה בשום שכבה — "לא נמצא", בלי לנחש עיר שגויה בשקט.
     """
     results = _raw_geocode_search(client, city_name, count=1)
     if results:
@@ -171,7 +287,7 @@ def geocode_city(client: httpx.Client, city_name: str) -> dict:
         if match:
             return {"found": True, **match}
 
-    return {"found": False}
+    return _nominatim_forward_geocode(client, city_name)
 
 
 def get_current_uv(client: httpx.Client, lat: float, lon: float) -> float:
@@ -802,6 +918,280 @@ def send_uv_forecast_chart(chat_id: int, city_name: str, lat: float, lon: float,
         logger.exception("send_uv_forecast_chart failed for chat_id=%s city=%s", chat_id, city_name)
 
 
+# ---------------------------------------------------------------------
+# גרף UV יומי ל-/today — עקומת UV מלאה ליום קלנדרי (00:00-23:00 UTC)
+# עם חלונות ה-sessions של אותו יום מסומנים עליה. הוחלט עם המשתמש
+# ב-2026-09-08 (במקום למשל בר-גרף actual-מול-SPF30): "עקומת UV של היום
+# + חלונות ה-sessions מסומנים עליה", נשלח אוטומטית יחד עם הטקסט של
+# /today (לא כפקודה נפרדת). ראו handle_today / send_daily_exposure_chart.
+# ---------------------------------------------------------------------
+def fetch_day_uv_curve(client: httpx.Client, lat: float, lon: float, target_date) -> tuple[list[str], list[float]]:
+    """
+    שולף את עקומת ה-UV השעתית המלאה (00:00–23:00 UTC) של יום קלנדרי שלם
+    (target_date). timezone=UTC בכוונה (לא auto כמו fetch_uv_forecast_next_24h)
+    כדי שהאינדקס i יתאים ישירות לשעה i ב-UTC — אותו יום קלנדרי בדיוק
+    ש-_sessions_on_date בודקת מולו (start_time.date() ב-UTC), כדי
+    שחלונות ה-sessions ב-render_daily_exposure_chart ייושרו נכון מול
+    העקומה. past_days/forecast_days נגזרים מההפרש בין today ל-target_date;
+    מחוץ לטווח הנתמך של Open-Meteo (עבר רחוק/עתיד רחוק) מחזירים ([], [])
+    ומשאירים לקורא (send_daily_exposure_chart) לדלג על הגרף בלי לקרוס.
+    """
+    today = datetime.now(timezone.utc).date()
+    days_diff = (today - target_date).days
+    if days_diff > 92 or days_diff < -14:
+        return [], []
+    if days_diff >= 0:
+        past_days, forecast_days = days_diff, 1
+    else:
+        past_days, forecast_days = 0, min(-days_diff + 1, 16)
+
+    response = client.get(
+        OPEN_METEO_URL,
+        params={
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "uv_index",
+            "past_days": past_days,
+            "forecast_days": forecast_days,
+            "timezone": "UTC",
+        },
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    hourly = response.json()["hourly"]
+    times: list[str] = hourly["time"]
+    uvs: list[float] = hourly["uv_index"]
+
+    day_prefix = target_date.isoformat()
+    day_hours = [(t, uv) for t, uv in zip(times, uvs) if t.startswith(day_prefix)]
+    if not day_hours:
+        return [], []
+    day_times, day_uvs = zip(*day_hours)
+    return list(day_times), list(day_uvs)
+
+
+def render_daily_exposure_chart(
+    hourly_times: list[str], hourly_uv: list[float], sessions: list[dict], city_name: str, target_date,
+    utc_offset_seconds: int = 0,
+) -> bytes:
+    """
+    מרנדר PNG (matplotlib, in-memory) של עקומת ה-UV ליום שלם (target_date)
+    עם חלונות ה-sessions של אותו יום מסומנים עליה כרצועות אנכיות —
+    התוספת הגרפית ל-/today (ראו handle_today/send_daily_exposure_chart).
+
+    עותק עצמאי בכוונה מ-render_uv_forecast_chart, לא חולק איתה קוד
+    (מלבד _build_uv_risk_cmap המשותף): לזו יש היסטוריית משוב מפורטת
+    משלה (ראו ה-docstring שלה) ולא רוצים ששינוי כאן ישפיע על גרסה
+    שכבר עובדת ואושרה. מאותה סיבה: הכותרת/legend/annotations כאן
+    בטקסט אנגלי בלבד (רק שם-העיר עצמו, שם פרטי, יכול להיות בעברית,
+    בדיוק כמו ברכיב הקיים) — נמנעים במכוון מלהכניס בלוק טקסט עברי חדש
+    ל-matplotlib בלי אימות ישיר מול תוצאה אמיתית מהבוט החי (ראו את
+    הדיון על get_display()/bidi ברכיב הקיים).
+
+    session פתוח (end_time=None) מוצג עד "עכשיו" בפועל, לא עד סוף היום —
+    הגרף תמיד משקף חשיפה שכבר קרתה, לא ניחוש לעתיד.
+
+    utc_offset_seconds (נוסף ב-2026-09-09, ראו fetch_utc_offset_seconds):
+    hourly_times מגיע מ-fetch_day_uv_curve ב-UTC ("בכוונה", ראו שם) —
+    בלי ההזחה הזו, תוויות ציר ה-X הוצגו כשעון UTC גולמי בלי שום סימון,
+    ומשתמש שראה "02:00" חשב שזה השעון המקומי שלו (תקלה אמיתית: משתמש
+    בקריית ים, UTC+3, ראה את "עכשיו" מסומן ב-02:00-03:00 בזמן שהשעון
+    אצלו הראה 5:00). כאן מזיזים רק את *התוויות המוצגות* לפי הזמן המקומי
+    של reference — המיקום המספרי של כל רצועה/סימון (למטה) נשאר מחושב
+    לפי UTC פנימית, עקבי עם _sessions_on_date/fetch_day_uv_curve, כך
+    שאף רצועה לא זזה בפועל, רק הכיתוב שמעליה.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.colors import Normalize
+
+    hours = [
+        (datetime.fromisoformat(t) + timedelta(seconds=utc_offset_seconds)).strftime("%H:%M")
+        for t in hourly_times
+    ]
+    x = list(range(len(hours)))
+    y_max = max(max(hourly_uv, default=0) * 1.15, 3)
+
+    fig, ax = plt.subplots(figsize=(11, 4.5), dpi=150)
+
+    invisible_fill = ax.fill_between(x, 0, hourly_uv, color="none")
+    area_under_curve = invisible_fill.get_paths()[0]
+
+    if x:
+        cmap = _build_uv_risk_cmap(y_max)
+        gradient = np.array(hourly_uv, dtype=float).reshape(1, -1)
+        image = ax.imshow(
+            gradient, extent=[x[0] - 0.5, x[-1] + 0.5, 0, y_max], origin="lower",
+            aspect="auto", cmap=cmap, norm=Normalize(vmin=0, vmax=y_max),
+            interpolation="bilinear", alpha=0.6, zorder=2,
+        )
+        image.set_clip_path(area_under_curve, transform=ax.transData)
+
+    ax.plot(
+        x, hourly_uv, color="#2b2b2b", linewidth=2,
+        marker="o", markersize=4, markerfacecolor="#2b2b2b", zorder=3,
+    )
+
+    # רצועות ה-sessions: קידוד חזותי נפרד מהגרדיאנט (hatch + קו-מתאר, לא
+    # רק שקיפות-צבע) כדי שיישאר קריא גם ב-colorblind/הדפסה — ראו dataviz
+    # skill. session פתוח מוצג עד "עכשיו" בפועל. ה-session עם מדד החשיפה
+    # הגבוה ביותר (_peak_exposure_session, ראו שם) מודגש בצבע חם נפרד
+    # ומתויג עם שם-העיר — "המיקום איפה שמד החשיפה היה הגבוה ביותר",
+    # הוחלט עם המשתמש ב-2026-09-08.
+    midnight = datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    x_min, x_max = (x[0] - 0.5, x[-1] + 0.5) if x else (0, 24)
+    peak_session = _peak_exposure_session(sessions)
+    has_session_band = False
+    has_peak_band = False
+    for session in sessions:
+        if not session.get("start_time"):
+            continue
+        start_dt = datetime.fromisoformat(session["start_time"])
+        end_dt = datetime.fromisoformat(session["end_time"]) if session.get("end_time") else now
+        x_start = max((start_dt - midnight).total_seconds() / 3600, x_min)
+        x_end = min((end_dt - midnight).total_seconds() / 3600, x_max)
+        if x_end <= x_start:
+            continue
+        is_peak = peak_session is not None and session is peak_session
+        color = "#c0392b" if is_peak else "#2b6cb0"
+        if is_peak:
+            band_label = None if has_peak_band else "highest exposure"
+            has_peak_band = True
+        else:
+            band_label = None if has_session_band else "session"
+            has_session_band = True
+        ax.axvspan(
+            x_start, x_end, facecolor=color, alpha=0.22 if is_peak else 0.16, hatch="//",
+            edgecolor=color, linewidth=1.4 if is_peak else 1.0,
+            zorder=2.6 if is_peak else 2.5, label=band_label,
+        )
+        if is_peak:
+            label = f"{session.get('city', '')} {session['exposure_score']}%"
+        else:
+            label = f"{session['exposure_score']}%" if session.get("exposure_score") is not None else "open"
+        ax.annotate(
+            label, ((x_start + x_end) / 2, y_max * 0.95), ha="center", va="top",
+            fontsize=8, color=color, fontweight="bold", zorder=4,
+        )
+
+    ax.set_title(f"Daily UV Exposure — {city_name} — {target_date.strftime('%d.%m.%Y')}", fontsize=13, pad=12)
+    ax.set_ylabel("UV Index")
+    # מציינים "local time" במפורש על הציר עצמו — לא רק שהשעות מוזחות
+    # (utc_offset_seconds למעלה), אלא כדי שלא ייראה כמו UTC סתום שוב
+    # בעתיד אם ה-offset הזה ייכשל-בשקט ויחזור ל-0 (fetch_utc_offset_seconds
+    # נכשל best-effort).
+    ax.set_xlabel("Hour (local time)", fontsize=9, color="#555555")
+    ax.set_ylim(0, y_max)
+    if x:
+        ax.set_xlim(-0.5, len(x) - 0.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels(hours, rotation=60, ha="right", fontsize=7)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", color="#e5e5e5", linewidth=0.8, zorder=1)
+    ax.set_axisbelow(True)
+
+    if hourly_uv:
+        peak_idx = max(range(len(hourly_uv)), key=lambda i: hourly_uv[i])
+        ax.annotate(
+            f"peak {hourly_uv[peak_idx]:.1f}",
+            (peak_idx, hourly_uv[peak_idx]),
+            textcoords="offset points", xytext=(0, 8),
+            ha="center", fontsize=8, color="#333333", fontweight="bold", zorder=4,
+        )
+
+    if has_session_band or has_peak_band:
+        ax.legend(loc="upper left", fontsize=8, framealpha=0.9)
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _notify_admin_chart_skip(target_date, reason: str) -> None:
+    """
+    best-effort בלבד: מדווחת ל-ADMIN_CHAT_ID (אם מוגדר, ראו ADMIN_CHAT_ID
+    למעלה) מתי ולמה גרף /today לא נשלח בפועל. נוספה ב-2026-09-08 אחרי
+    שהתברר שהמשתמש הריץ /today וקיבל טקסט תקין אבל בלי תמונה בכלל —
+    send_daily_exposure_chart בולעת כל כשל בכוונה (כדי שכשל בגרף לעולם
+    לא ישבור את הטקסט של /today עצמו), אבל זה הפך את הכשל ל"שקט" לגמרי
+    ובלתי-ניתן-לאבחון בלי גישה ללוגים של ה-Space. לא זורקת ולא מעכבת
+    את /today עצמו במקרה של כשל בשליחה גם כאן.
+    """
+    if not ADMIN_CHAT_ID:
+        return
+    try:
+        send_message(ADMIN_CHAT_ID, f"⚠️ גרף /today לא נשלח (תאריך {target_date}): {reason[:500]}")
+    except Exception as e:
+        # תוקן ב-2026-09-08 אחרי הפעלה ראשונה בפרודקשן: השליחה עצמה נכשלה
+        # (WARNING בלוג) אבל בלי סיבה — כי ה-except הישן בלע את e ולא הדפיס
+        # אותו, כמו _notify_admin_token_usage למעלה שכן עושה זאת. עכשיו
+        # מדפיסים את e בפועל כדי שכשל הבא יהיה ניתן-לאבחון בלי ניחושים.
+        logger.warning("Failed to send admin chart-skip notification for target_date=%s: %s", target_date, e)
+
+
+def send_daily_exposure_chart(chat_id: int, todays_sessions: list[dict], target_date) -> None:
+    """
+    שולח (best-effort) את גרף ה-UV היומי עם חלונות ה-sessions מסומנים —
+    תוספת גרפית ל-/today (ראו handle_today). עוטף הכל ב-try/except רחב:
+    הטקסט של /today כבר נשלח למשתמש לפני שהפונקציה הזו נקראת (אותו
+    דפוס בדיוק כמו send_uv_forecast_chart) — כשל כאן (רשת, matplotlib
+    חסר, אין session עם lat/lon) לעולם לא אמור להיראות למשתמש כתקלה
+    ב-/today עצמו. כל דילוג/כשל גם מדווח ל-_notify_admin_chart_skip
+    (best-effort נוסף, ADMIN_CHAT_ID בלבד) — כדי שהדילוג לא יהיה שקט
+    לגמרי (ראו שם לרציונל).
+
+    בוחרים את מיקום-הייחוס לעקומת ה-UV לפי ה-session המוקדם ביותר היום
+    שיש לו lat/lon שמור (sessions ישנים/לפני migration ה-lat/lon עשויים
+    להיות בלי lat/lon בכלל — אז מדלגים על הגרף כליל, לא מנחשים מיקום).
+    """
+    try:
+        reference = min(
+            (s for s in todays_sessions if s.get("lat") is not None and s.get("lon") is not None),
+            key=lambda s: s["start_time"],
+            default=None,
+        )
+        if reference is None:
+            logger.info("send_daily_exposure_chart: no session today has lat/lon yet, skipping chart")
+            _notify_admin_chart_skip(target_date, "אף session באותו יום לא כולל lat/lon שמור")
+            return
+
+        with httpx.Client() as client:
+            hourly_times, hourly_uv = fetch_day_uv_curve(client, reference["lat"], reference["lon"], target_date)
+            if not hourly_uv:
+                logger.info("send_daily_exposure_chart: no UV curve available for %s, skipping", target_date)
+                _notify_admin_chart_skip(target_date, "fetch_day_uv_curve לא החזירה נתונים (טווח לא נתמך/תשובה ריקה)")
+                return
+            # תוקן ב-2026-09-09: ציר-השעות של הגרף הוצג לפי UTC גולמי בלי
+            # שום סימון (ראו render_daily_exposure_chart) — תקלה אמיתית
+            # שדווחה: משתמש בקריית ים (UTC+3) ראה את "עכשיו" מסומן סביב
+            # 02:00-03:00 בזמן שהשעון אצלו הראה 5:00, ונראה כמו תקלה.
+            # אותו מנגנון fetch_utc_offset_seconds בדיוק כמו ב-/add_session
+            # ו-/edit_session (ראו שם) — best-effort, נופל חזרה ל-0 (UTC
+            # כפי שהיה) אם הקריאה נכשלת.
+            utc_offset_seconds = fetch_utc_offset_seconds(client, reference["lat"], reference["lon"])
+
+        chart_png = render_daily_exposure_chart(
+            hourly_times, hourly_uv, todays_sessions, reference["city"], target_date,
+            utc_offset_seconds=utc_offset_seconds,
+        )
+        caption = f"📊 עקומת UV ל-{target_date.strftime('%d.%m.%Y')} עם ה-sessions שלך מסומנים עליה"
+        peak = _peak_exposure_session(todays_sessions)
+        if peak is not None:
+            caption += f"\nהחשיפה הגבוהה ביותר: {peak['city']} ({peak['exposure_score']}%)"
+        send_photo(chat_id, chart_png, caption=caption)
+        logger.info("Sent daily exposure chart to chat_id=%s for %s", chat_id, target_date)
+    except Exception as e:
+        logger.exception("send_daily_exposure_chart failed for chat_id=%s target_date=%s", chat_id, target_date)
+        _notify_admin_chart_skip(target_date, f"חריגה: {e}")
+
+
 def _begin_session(
     chat_id: int,
     username: str,
@@ -823,6 +1213,8 @@ def _begin_session(
             "start_time": now.isoformat(),
             "end_time": None,
             "uv_index": uv_index,
+            "lat": lat,
+            "lon": lon,
             "spf": None,
             "exposure_score": None,
         },
@@ -911,12 +1303,35 @@ def handle_end_session(chat_id: int, username: str, args: str) -> None:
     end_time = datetime.now(timezone.utc)
     duration_minutes = (end_time - start_time).total_seconds() / 60
 
-    score = calculate_exposure_score(session["uv_index"], duration_minutes, skin_type, spf)
+    # ברירת מחדל: הדגימה הבודדת שנשמרה ב-_begin_session (התנהגות ישנה).
+    # אם יש lat/lon שמורים (שורות אחרי migration ה-lat/lon) מנסים לרענן
+    # לממוצע-משוקלל-משך על פני כל ה-session בפועל — ראו weighted_average_uv
+    # לרציונל המלא (תיקון לתקלת מצפה רמון, 2026-09-08: session ארוך עם
+    # דגימה בודדת ליד חצות הציג UV=0.0 במקום שיא אמיתי בצהריים). כשל
+    # ברענון (רשת, lat/lon חסרים בשורות ישנות מלפני ה-migration, וכו')
+    # נופל בחזרה בבטחה לדגימה המקורית — אף פעם לא מונע מ-/end_session
+    # לסיים בהצלחה.
+    uv_index = session["uv_index"]
+    lat, lon = session.get("lat"), session.get("lon")
+    if lat is not None and lon is not None:
+        try:
+            with httpx.Client() as client:
+                refreshed_uv = fetch_historical_uv(client, lat, lon, start_time, end_time)
+            if refreshed_uv is not None:
+                uv_index = refreshed_uv
+        except Exception:
+            logger.exception(
+                "handle_end_session: failed to refresh weighted-average UV for session id=%s — "
+                "falling back to the original single-snapshot value",
+                session["id"],
+            )
+
+    score = calculate_exposure_score(uv_index, duration_minutes, skin_type, spf)
 
     update_rows(
         "exposure_log",
         {"id": f"eq.{session['id']}"},
-        {"end_time": end_time.isoformat(), "spf": spf, "exposure_score": score},
+        {"end_time": end_time.isoformat(), "spf": spf, "exposure_score": score, "uv_index": uv_index},
     )
 
     send_message(
@@ -952,18 +1367,66 @@ def _parse_kv_fields(tokens: list[str], allowed_keys: set[str]) -> tuple[list[st
     return tokens, {}
 
 
-def fetch_historical_uv(client: httpx.Client, lat: float, lon: float, target_time: datetime) -> float | None:
+def weighted_average_uv(
+    hourly_times: list[str], hourly_uv: list[float | None], start_time: datetime, end_time: datetime
+) -> float | None:
     """
-    שולף UV Index היסטורי לשעה מדויקת (target_time, מניחים UTC "גולמי" —
-    בלי המרת אזור זמן, עקבי עם ההנחה הפשוטה שכבר קיימת ב-/edit_session
-    ש-HH:MM שמוזן ע"י המשתמש הוא הזמן "כמו שהוא"). timezone=UTC (לא auto
-    כמו fetch_uv_forecast_next_24h) בדיוק כדי ש-hourly.time יתאים ישירות
-    ל-target_time בלי המרה. past_days מחושב מההפרש בין היום לתאריך המבוקש;
-    Open-Meteo תומך עד 92 יום אחורה — מעבר לזה (או שהתאריך בעתיד) מחזירים
-    None ומשאירים ל-handle_add_session להחליט איך להגיב.
+    ממוצע UV משוקלל-משך על פני כל טווח ה-session [start_time, end_time) —
+    מחליף התאמה לשעה בודדת (הגרסה הקודמת של fetch_historical_uv), שנתנה
+    תמונה שגויה ל-sessions ארוכים/רב-שעתיים. התיקון נובע מתקלה אמיתית
+    ב-2026-09-08: session של 11 שעות במצפה רמון הוצג עם UV=0.0 בדשבורד,
+    כי הדגימה הבודדת (בזמן פתיחת ה-session) נפלה על שעת לילה, בעוד
+    שהיה שיא UV מעל 7 בצהריים אותו יום.
+
+    כל bucket שעתי של Open-Meteo (hourly_times[i]) מייצג את הטווח
+    [t, t+1h). מחשבים לכל bucket את החפיפה (בדקות) עם [start_time,
+    end_time), ומחזירים ממוצע UV משוקלל לפי משך-החפיפה. זה מתמטית שקול
+    לסכימת "מנת חשיפה" לפי-שעה ואז חלוקה בסך-הכל, כי calculate_exposure_score
+    לינארית ב-uv_index עבור duration/skin_type/spf קבועים — כלומר אפשר
+    להזין את הממוצע-המשוקלל פעם אחת לנוסחה הקיימת בלי לשנות אותה או את
+    חוזה ה-DB בכלל. bucket-ים עם uv=None מדולגים. בלי שום חפיפה (או כל
+    ה-UV חסר) מחזירים None ומשאירים לקורא (fetch_historical_uv) להחליט.
+    """
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for t, uv in zip(hourly_times, hourly_uv):
+        if uv is None:
+            continue
+        bucket_start = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
+        bucket_end = bucket_start + timedelta(hours=1)
+        overlap_start = max(bucket_start, start_time)
+        overlap_end = min(bucket_end, end_time)
+        overlap_minutes = (overlap_end - overlap_start).total_seconds() / 60
+        if overlap_minutes <= 0:
+            continue
+        weighted_sum += uv * overlap_minutes
+        total_weight += overlap_minutes
+    if total_weight <= 0:
+        return None
+    return weighted_sum / total_weight
+
+
+def fetch_historical_uv(
+    client: httpx.Client, lat: float, lon: float, start_time: datetime, end_time: datetime
+) -> float | None:
+    """
+    שולף UV Index היסטורי כממוצע-משוקלל-משך על פני כל טווח ה-session
+    [start_time, end_time) — ראו weighted_average_uv לרציונל המלא (כולל
+    התקלה האמיתית שהובילה לתיקון הזה). מקבלת start_time/end_time כ-UTC
+    "אמיתי" (aware, tzinfo=UTC) — מי שקורא לפונקציה הזו (handle_add_session/
+    handle_edit_session) כבר אחראי להמיר את הזמן המקומי שהמשתמש הקליד
+    ל-UTC לפני כן (ראו fetch_utc_offset_seconds למטה; תוקן ב-2026-09-08,
+    לפני כן הייתה כאן הנחה שגויה ש-HH:MM שהמשתמש מקליד הוא כבר UTC).
+    timezone=UTC (לא auto כמו fetch_uv_forecast_next_24h) בדיוק כדי
+    ש-hourly.time יתאים ישירות בלי המרה נוספת. past_days מחושב מתאריך
+    ההתחלה (start_time, לא end_time —
+    ה-session כולו כבר בעבר, ו-forecast_days=1 מכסה את כל שעות "היום"
+    הנוכחי, כולל אם end_time הוא today). Open-Meteo תומך עד 92 יום
+    אחורה; מעבר לזה (או שהתאריך בעתיד) מחזירים None ומשאירים לקורא
+    להחליט איך להגיב (הודעת שגיאה / נפילה חזרה לדגימה הישנה, לפי הנתיב).
     """
     today = datetime.now(timezone.utc).date()
-    days_back = (today - target_time.date()).days
+    days_back = (today - start_time.date()).days
     if not (0 <= days_back <= 92):
         return None
 
@@ -983,12 +1446,45 @@ def fetch_historical_uv(client: httpx.Client, lat: float, lon: float, target_tim
     hourly = response.json()["hourly"]
     times: list[str] = hourly["time"]
     uvs: list[float] = hourly["uv_index"]
+    return weighted_average_uv(times, uvs, start_time, end_time)
 
-    target_hour = target_time.replace(minute=0, second=0, microsecond=0, tzinfo=None).isoformat(timespec="minutes")
-    for t, uv in zip(times, uvs):
-        if t == target_hour and uv is not None:
-            return uv
-    return None
+
+def fetch_utc_offset_seconds(client: httpx.Client, lat: float, lon: float) -> int:
+    """
+    נוספה ב-2026-09-08: מחזירה את הפרשי-השעות מ-UTC (בשניות) של lat/lon
+    נתון, לפי ה-timezone (IANA) שבו Open-Meteo מזהה את המיקום בעצמו —
+    timezone=auto גורם לתשובה לכלול utc_offset_seconds, בדיוק אותו
+    mechanism שכבר בשימוש ותקין ב-fetch_uv_forecast_next_24h למעלה (ראו
+    שם: זה גם מה שתיקן בעבר תחזית שהוצגה לפי UTC לניו יורק במקום השעון
+    המקומי שם).
+
+    התקלה שהובילה לפונקציה הזו: /add_session ו-/edit_session פירשו
+    start=/end=HH:MM כ-UTC "כמו שהוא" בלי שום קשר למיקום בפועל — מי
+    שהקליד "מצפה רמון start=5:00" התכוון ל-5 בבוקר שעון ישראל (UTC+2/+3),
+    לא ל-5 בבוקר UTC (=7/8 בבוקר בישראל, כבר לא "בוקר מוקדם" בכלל).
+    זה גם גרם לבדיקת "שעת הסיום לא יכולה להיות בעתיד" להיכשל/להצליח
+    לפי מקרה שרירותי, כי היא השוותה UTC אמיתי מול "UTC" שגוי.
+
+    best-effort: כשל (רשת/תשובה לא תקינה) -> מחזירה 0 (UTC), כלומר
+    נופלים בחזרה בבטחה להתנהגות הישנה במקום לקרוס.
+    """
+    try:
+        response = client.get(
+            OPEN_METEO_URL,
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "hourly": "uv_index",
+                "forecast_days": 1,
+                "timezone": "auto",
+            },
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        return response.json().get("utc_offset_seconds", 0)
+    except Exception:
+        logger.warning("fetch_utc_offset_seconds failed for lat=%s lon=%s — falling back to UTC", lat, lon)
+        return 0
 
 
 def handle_add_session(chat_id: int, username: str, args: str) -> None:
@@ -996,9 +1492,13 @@ def handle_add_session(chat_id: int, username: str, args: str) -> None:
     /add_session <עיר> start=HH:MM end=HH:MM [spf=<מספר>] [date=D.M] [uv=<מספר>]
     לדוגמה: /add_session תל אביב start=14:00 end=16:30 spf=30
 
-    בלי date — מניחים היום. end<=start מתפרש כחציית חצות (יום למחרת),
+    בלי date — מניחים היום (UTC). start=/end=HH:MM מתפרשים כזמן *מקומי
+    של העיר* (fetch_utc_offset_seconds, ראו שם) — לא UTC — כי ככה משתמש
+    מתכוון: "מצפה רמון start=5:00" זה 5 בבוקר שעון ישראל, לא 5 בבוקר UTC.
+    תוקן ב-2026-09-08 (ראו fetch_utc_offset_seconds לרציונל המלא/לתקלה
+    האמיתית). end<=start מתפרש כחציית חצות (יום למחרת, בזמן המקומי),
     כמו ב-/edit_session. uv= הוא override ידני; בלעדיו שולפים UV היסטורי
-    אוטומטית (fetch_historical_uv).
+    אוטומטית (fetch_historical_uv, שמקבלת כבר UTC אמיתי).
     """
     ALLOWED = {"start", "end", "spf", "date", "uv"}
     tokens = args.strip().split()
@@ -1008,7 +1508,8 @@ def handle_add_session(chat_id: int, username: str, args: str) -> None:
     usage = (
         "שימוש: /add_session <עיר> start=HH:MM end=HH:MM [spf=<מספר>] [date=D.M]\n"
         "לדוגמה: /add_session תל אביב start=14:00 end=16:30 spf=30\n"
-        "(בלי date מניחים היום; UV Index נשלף אוטומטית לפי ההיסטוריה)."
+        "(שעות בזמן המקומי של העיר; בלי date מניחים היום; UV Index נשלף "
+        "אוטומטית לפי ההיסטוריה)."
     )
     if not city or "start" not in fields or "end" not in fields:
         send_message(chat_id, usage)
@@ -1032,41 +1533,48 @@ def handle_add_session(chat_id: int, username: str, args: str) -> None:
             send_message(chat_id, "פורמט תאריך לא תקין. השתמשו ב-date=D.M (למשל date=25.8).")
             return
 
-    try:
-        start_hh, start_mm = fields["start"].split(":")
-        start_time = datetime(
-            target_date.year, target_date.month, target_date.day,
-            int(start_hh), int(start_mm), tzinfo=timezone.utc,
-        )
-    except (ValueError, IndexError):
-        send_message(chat_id, "פורמט שעת התחלה לא תקין. השתמשו ב-start=HH:MM (למשל start=14:00).")
-        return
-
-    try:
-        end_hh, end_mm = fields["end"].split(":")
-        end_time = start_time.replace(hour=int(end_hh), minute=int(end_mm), second=0, microsecond=0)
-        if end_time <= start_time:
-            end_time += timedelta(days=1)  # session שחצה חצות
-    except (ValueError, IndexError):
-        send_message(chat_id, "פורמט שעת סיום לא תקין. השתמשו ב-end=HH:MM (למשל end=16:30).")
-        return
-
-    if end_time > now:
-        send_message(chat_id, "שעת הסיום לא יכולה להיות בעתיד.")
-        return
-
-    spf = None
-    if "spf" in fields:
-        if not fields["spf"].isdigit():
-            send_message(chat_id, "spf חייב להיות מספר, למשל spf=30.")
-            return
-        spf = int(fields["spf"])
-
     with httpx.Client() as client:
         geo = geocode_city(client, city)
         if not geo["found"]:
             send_message(chat_id, f'לא הצלחתי לזהות עיר בשם "{city}". בדקו את האיות ונסו שוב.')
             return
+
+        # geocoding זז לפני parsing השעות (בשונה מהקוד הישן) כי צריך את
+        # lat/lon כדי לדעת את אזור-הזמן המקומי לפני שאפשר בכלל להמיר
+        # start=/end=HH:MM ל-UTC אמיתי.
+        utc_offset_seconds = fetch_utc_offset_seconds(client, geo["latitude"], geo["longitude"])
+
+        try:
+            start_hh, start_mm = fields["start"].split(":")
+            local_start = datetime(
+                target_date.year, target_date.month, target_date.day,
+                int(start_hh), int(start_mm),
+            )
+            start_time = (local_start - timedelta(seconds=utc_offset_seconds)).replace(tzinfo=timezone.utc)
+        except (ValueError, IndexError):
+            send_message(chat_id, "פורמט שעת התחלה לא תקין. השתמשו ב-start=HH:MM (למשל start=14:00).")
+            return
+
+        try:
+            end_hh, end_mm = fields["end"].split(":")
+            local_end = local_start.replace(hour=int(end_hh), minute=int(end_mm), second=0, microsecond=0)
+            if local_end <= local_start:
+                local_end += timedelta(days=1)  # session שחצה חצות (בזמן המקומי)
+            end_time = (local_end - timedelta(seconds=utc_offset_seconds)).replace(tzinfo=timezone.utc)
+        except (ValueError, IndexError):
+            send_message(chat_id, "פורמט שעת סיום לא תקין. השתמשו ב-end=HH:MM (למשל end=16:30).")
+            return
+
+        if end_time > now:
+            send_message(chat_id, "שעת הסיום לא יכולה להיות בעתיד.")
+            return
+
+        spf = None
+        if "spf" in fields:
+            if not fields["spf"].isdigit():
+                send_message(chat_id, "spf חייב להיות מספר, למשל spf=30.")
+                return
+            spf = int(fields["spf"])
 
         if "uv" in fields:
             try:
@@ -1075,7 +1583,7 @@ def handle_add_session(chat_id: int, username: str, args: str) -> None:
                 send_message(chat_id, "uv חייב להיות מספר, למשל uv=6.5.")
                 return
         else:
-            uv_index = fetch_historical_uv(client, geo["latitude"], geo["longitude"], start_time)
+            uv_index = fetch_historical_uv(client, geo["latitude"], geo["longitude"], start_time, end_time)
             if uv_index is None:
                 send_message(
                     chat_id,
@@ -1097,6 +1605,8 @@ def handle_add_session(chat_id: int, username: str, args: str) -> None:
             "start_time": start_time.isoformat(),
             "end_time": end_time.isoformat(),
             "uv_index": uv_index,
+            "lat": geo["latitude"],
+            "lon": geo["longitude"],
             "spf": spf,
             "exposure_score": score,
         },
@@ -1162,6 +1672,94 @@ def handle_my_sessions(chat_id: int, username: str) -> None:
     send_message(chat_id, "\n".join(lines))
 
 
+def handle_today(chat_id: int, username: str, args: str) -> None:
+    """
+    /today [date=D.M] — אנליזה יומית: סה"כ מדד חשיפה על כל ה-sessions
+    הסגורים שהתחילו ביום המבוקש (UTC, כמו שאר הזמנים באפליקציה; בלי
+    date= — היום), + לכל session השוואה "מה היה קורה עם SPF קבוע"
+    (DAILY_SUMMARY_REFERENCE_SPF, ראו שם) — כולל sessions שכבר השתמשו
+    ב-SPF כלשהו (ההשוואה תמיד מול אותו קבוע, לא רק "בלי הגנה בכלל").
+    session פתוח כרגע לא נכלל בסכימה (עדיין אין לו exposure_score מחושב)
+    אבל מוזכר בנפרד עם תזכורת ל-/end_session.
+
+    date=D.M הוחלט עם המשתמש ב-2026-09-08 ("הוסף chart_date ככה שאוכל
+    לראות את החשיפה לפי תאריך") — אותו פורמט/פרסינג בדיוק כמו
+    date= ב-/add_session (כולל גלגול-שנה כש-D.M "עתידי" ביחס להיום),
+    לעקביות. גם הגרף (send_daily_exposure_chart) מקבל את אותו target_date.
+
+    באותה בקשה: "שהגרף יציג את המיקום איפה שמד החשיפה היה הגבוה ביותר"
+    — מומש ב-_peak_exposure_session (משותף עם render_daily_exposure_chart):
+    מוצג גם כאן בטקסט וגם מודגש חזותית על הגרף.
+
+    שולף עד 50 sessions אחרונים ומסנן ליום המבוקש בפייתון (לא ב-query
+    עם range filter על start_time) — פשוט יותר לבדיקה, וקצב שימוש-קורס
+    שלא מצדיק אופטימיזציה מוקדמת (ראו handle_my_sessions לדפוס דומה).
+    """
+    args = args.strip()
+    target_date = datetime.now(timezone.utc).date()
+    if args:
+        if not args.startswith("date="):
+            send_message(chat_id, "שימוש: /today או /today date=D.M (למשל date=25.8).")
+            return
+        try:
+            day, month = args[len("date="):].split(".")
+            candidate = target_date.replace(month=int(month), day=int(day))
+            if candidate > target_date:
+                candidate = candidate.replace(year=candidate.year - 1)
+            target_date = candidate
+        except (ValueError, IndexError):
+            send_message(chat_id, "פורמט תאריך לא תקין. השתמשו ב-date=D.M (למשל date=25.8).")
+            return
+
+    users = select_rows("users", {"telegram_username": f"eq.{username}"})
+    skin_type = users[0]["skin_type"] if users else None
+
+    sessions = select_rows(
+        "exposure_log",
+        {"telegram_username": f"eq.{username}", "order": "start_time.desc", "limit": "50"},
+    )
+    todays_sessions = _sessions_on_date(sessions, target_date)
+
+    closed = [s for s in todays_sessions if s["end_time"] and s["exposure_score"] is not None]
+    open_sessions = [s for s in todays_sessions if not s["end_time"]]
+
+    if not closed and not open_sessions:
+        if target_date == datetime.now(timezone.utc).date():
+            send_message(chat_id, "עוד אין לך sessions היום. שלחו /start_session <עיר> כדי להתחיל.")
+        else:
+            send_message(chat_id, f"אין לך sessions בתאריך {target_date.strftime('%d.%m.%Y')}.")
+        return
+
+    lines = [f"📊 סיכום ליום {target_date.strftime('%d.%m.%Y')}:"]
+
+    if closed:
+        summaries = [_daily_session_summary(s, skin_type, DAILY_SUMMARY_REFERENCE_SPF) for s in closed]
+        total_actual = sum(sm["actual_score"] for sm in summaries)
+        total_hypothetical = sum(sm["hypothetical_score"] for sm in summaries)
+        lines.append(f'{len(closed)} sessions · סה"כ מדד חשיפה: {total_actual}%')
+        lines.append(f"עם SPF {DAILY_SUMMARY_REFERENCE_SPF} קבוע לאורך כל היום: כ-{total_hypothetical}% במקום זאת")
+
+        peak = _peak_exposure_session(closed)
+        if peak is not None:
+            lines.append(f"מדד החשיפה הגבוה ביותר: {peak['city']} ({peak['exposure_score']}%)")
+
+        lines.append("")
+        for s, sm in zip(closed, summaries):
+            spf_label = f"SPF {sm['spf']}" if sm["spf"] else "בלי קרם הגנה"
+            lines.append(
+                f"#{sm['id']} · {sm['city']} · UV {s['uv_index']:.1f} · {spf_label} · "
+                f"ציון {sm['actual_score']}% (עם SPF {DAILY_SUMMARY_REFERENCE_SPF}: {sm['hypothetical_score']}%)"
+            )
+        lines.append("")
+
+    if open_sessions:
+        cities = ", ".join(s["city"] for s in open_sessions)
+        lines.append(f"יש לך גם session פתוח כרגע ב-{cities} — הוא יתווסף לסיכום אחרי /end_session.")
+
+    send_message(chat_id, "\n".join(lines).strip())
+    send_daily_exposure_chart(chat_id, todays_sessions, target_date)
+
+
 def handle_delete_session(chat_id: int, username: str, args: str) -> None:
     """/delete_session <id> — מוחק session, רק אם הוא שייך למשתמש שביקש."""
     session_id = args.strip()
@@ -1186,10 +1784,14 @@ def handle_edit_session(chat_id: int, username: str, args: str) -> None:
     """
     /edit_session <id> [end=now|HH:MM] [spf=<מספר>] — עריכת session קיים
     (סוגר session תקוע, מתקן SPF ששכחו לציין וכו'). לפחות אחד מ-end/spf
-    חייב להינתן. HH:MM מתפרש כאותו יום קלנדרי כמו start_time — אם השעה
-    "לפני" שעת ההתחלה, מניחים חציית חצות ומזיזים ליום הבא. מדד החשיפה
-    מחושב מחדש בכל עריכה שיש אחריה end_time (חדש או קיים) — אחרת נשאר
-    None, בדיוק כמו session פתוח רגיל (יחושב סופית ב-/end_session).
+    חייב להינתן. end=HH:MM מתפרש כזמן *מקומי* של ה-session (לפי lat/lon
+    שלו, אם שמור — fetch_utc_offset_seconds; תוקן ב-2026-09-08 יחד עם
+    התיקון הזהה ב-/add_session, ראו שם לרציונל המלא) על אותו יום קלנדרי
+    מקומי כמו start_time — אם השעה "לפני" שעת ההתחלה המקומית, מניחים
+    חציית חצות ומזיזים ליום הבא. session ישן בלי lat/lon שמור (מלפני
+    ה-migration) נופל בחזרה ל-UTC "כמו שהוא", ההתנהגות הישנה. מדד
+    החשיפה מחושב מחדש בכל עריכה שיש אחריה end_time (חדש או קיים) —
+    אחרת נשאר None, בדיוק כמו session פתוח רגיל (יחושב סופית ב-/end_session).
     """
     parts = args.strip().split()
     if not parts or not parts[0].isdigit():
@@ -1231,11 +1833,18 @@ def handle_edit_session(chat_id: int, username: str, args: str) -> None:
         if fields["end"].lower() == "now":
             end_time = datetime.now(timezone.utc)
         else:
+            lat, lon = session.get("lat"), session.get("lon")
+            utc_offset_seconds = 0
+            if lat is not None and lon is not None:
+                with httpx.Client() as client:
+                    utc_offset_seconds = fetch_utc_offset_seconds(client, lat, lon)
             try:
                 hh, mm = fields["end"].split(":")
-                end_time = start_time.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-                if end_time <= start_time:
-                    end_time += timedelta(days=1)  # session שחצה חצות
+                local_start = (start_time + timedelta(seconds=utc_offset_seconds)).replace(tzinfo=None)
+                local_end = local_start.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+                if local_end <= local_start:
+                    local_end += timedelta(days=1)  # session שחצה חצות (בזמן המקומי)
+                end_time = (local_end - timedelta(seconds=utc_offset_seconds)).replace(tzinfo=timezone.utc)
             except (ValueError, IndexError):
                 send_message(chat_id, "פורמט שעה לא תקין. השתמשו ב-end=now או end=HH:MM (למשל end=22:30).")
                 return
@@ -1271,6 +1880,7 @@ COMMAND_HANDLERS = {
     "/end_session": handle_end_session,
     "/offline_session": handle_offline_session,
     "/my_sessions": lambda chat_id, username, args: handle_my_sessions(chat_id, username),
+    "/today": handle_today,
     "/delete_session": handle_delete_session,
     "/edit_session": handle_edit_session,
     "/add_session": handle_add_session,

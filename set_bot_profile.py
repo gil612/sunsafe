@@ -67,6 +67,7 @@ COMMANDS = [
     ("offline_session", "תיעוד session בלי אינטרנט"),
     ("set_skin_type", "הגדרת סוג עור (1-6, סולם Fitzpatrick)"),
     ("diagnose_skin", "הערכת נזק-שמש מתמונה (לא ייעוץ רפואי)"),
+    ("today", "אנליזה יומית + גרף UV (אפשר גם today date=D.M לתאריך אחר)"),
     ("dashboard", "קישור לאזור האישי שלכם"),
 ]
 
