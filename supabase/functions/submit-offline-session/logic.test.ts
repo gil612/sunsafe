@@ -22,6 +22,7 @@ import {
   pastDaysFor,
   validateInitData,
   validateSessionShape,
+  weightedAverageUv,
 } from "./logic.ts";
 
 function computeInitDataHash(fields: Record<string, string>, botToken: string): string {
@@ -118,6 +119,70 @@ test("nearestHourlyUv: picks the closest hour's value", () => {
 
 test("nearestHourlyUv: empty arrays return null", () => {
   assert.equal(nearestHourlyUv([], [], "2026-08-26T11:20:00Z"), null);
+});
+
+// ---------------------------------------------------------------------
+// weightedAverageUv — תיקון "דגימת UV בודדת" (מחליף nearestHourlyUv
+// בפועל ב-index.ts). ראו logic.ts לרציונל המלא, כולל התקלה האמיתית
+// ממצפה רמון ב-2026-09-08.
+// ---------------------------------------------------------------------
+
+test("weightedAverageUv: session fully within a single hourly bucket returns that bucket's UV", () => {
+  const times = ["2026-08-26T10:00:00", "2026-08-26T11:00:00", "2026-08-26T12:00:00"];
+  const uvs = [2.0, 5.0, 4.0];
+  const result = weightedAverageUv(times, uvs, "2026-08-26T11:10:00Z", "2026-08-26T11:40:00Z");
+  assert.equal(result, 5.0);
+});
+
+test("weightedAverageUv: session spanning two buckets weights each by overlap minutes", () => {
+  const times = ["2026-08-26T10:00:00", "2026-08-26T11:00:00", "2026-08-26T12:00:00"];
+  const uvs = [2.0, 8.0, 4.0];
+  // 15 min in the 2.0 bucket + 15 min in the 8.0 bucket -> (2*15 + 8*15) / 30 = 5.0
+  const result = weightedAverageUv(times, uvs, "2026-08-26T10:45:00Z", "2026-08-26T11:15:00Z");
+  assert.equal(result, 5.0);
+});
+
+test("weightedAverageUv: long multi-hour session (Mitzpe Ramon-style) averages across the whole span, not just the start hour", () => {
+  // session aligned exactly on hour boundaries (05:00-16:00, 11 full hours) so
+  // every bucket contributes an equal 60-minute weight -> plain average of the
+  // 11 daytime values. A 04:00 bucket with a very high UV sits just *outside*
+  // the session and must be excluded entirely — this is exactly the real bug:
+  // the old single-snapshot fetch could land on one hour (e.g. a near-zero
+  // night reading) and miss the midday peak completely; the fix must reflect
+  // the *whole* session, not overweight a lucky/unlucky single sample.
+  const times = [
+    "2026-08-26T04:00:00", // outside session -> must be excluded
+    "2026-08-26T05:00:00", "2026-08-26T06:00:00", "2026-08-26T07:00:00",
+    "2026-08-26T08:00:00", "2026-08-26T09:00:00", "2026-08-26T10:00:00",
+    "2026-08-26T11:00:00", "2026-08-26T12:00:00", "2026-08-26T13:00:00",
+    "2026-08-26T14:00:00", "2026-08-26T15:00:00",
+  ];
+  const uvs = [9.9, 0, 0, 1, 3, 6, 8, 7, 5, 2, 0, 0];
+  const daytimeUvs = uvs.slice(1); // exclude the 04:00 outlier
+  const expected = daytimeUvs.reduce((a, b) => a + b, 0) / daytimeUvs.length;
+
+  const result = weightedAverageUv(times, uvs, "2026-08-26T05:00:00Z", "2026-08-26T16:00:00Z");
+  assert.ok(result !== null && Math.abs(result - expected) < 1e-9, `expected ~${expected}, got ${result}`);
+  assert.ok(result! > 2.9, "weighted average should reflect the real midday peak, not read near zero");
+});
+
+test("weightedAverageUv: null UV buckets are skipped, not treated as zero", () => {
+  const times = ["2026-08-26T09:00:00", "2026-08-26T10:00:00"];
+  const uvs: (number | null)[] = [null, 5.0];
+  // 30 min overlap with each bucket, but the null bucket contributes no weight
+  const result = weightedAverageUv(times, uvs, "2026-08-26T09:30:00Z", "2026-08-26T10:30:00Z");
+  assert.equal(result, 5.0);
+});
+
+test("weightedAverageUv: no overlap between session and any bucket returns null", () => {
+  const times = ["2026-08-26T09:00:00"];
+  const uvs = [5.0];
+  const result = weightedAverageUv(times, uvs, "2026-08-27T09:00:00Z", "2026-08-27T10:00:00Z");
+  assert.equal(result, null);
+});
+
+test("weightedAverageUv: empty arrays return null", () => {
+  assert.equal(weightedAverageUv([], [], "2026-08-26T09:00:00Z", "2026-08-26T10:00:00Z"), null);
 });
 
 test("validateSessionShape: valid session passes", () => {

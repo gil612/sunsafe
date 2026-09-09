@@ -213,7 +213,9 @@ export function pastDaysFor(startTimeIso: string, now: Date = new Date()): numbe
   return diffDays;
 }
 
-/** מוצא את ה-UV הקרוב ביותר לזמן נתון מתוך תשובת Open-Meteo hourly. */
+/** מוצא את ה-UV הקרוב ביותר לזמן נתון מתוך תשובת Open-Meteo hourly.
+ *  שמור לצורך תאימות-לאחור/בדיקות — כבר לא בשימוש ב-index.ts (הוחלף
+ *  ב-weightedAverageUv, ראו שם). */
 export function nearestHourlyUv(
   hourlyTimes: string[],
   hourlyUv: number[],
@@ -231,4 +233,44 @@ export function nearestHourlyUv(
   if (bestIdx === -1) return null;
   const value = hourlyUv[bestIdx];
   return typeof value === "number" ? value : null;
+}
+
+/**
+ * ממוצע UV משוקלל-משך על פני כל טווח ה-session [startTimeIso, endTimeIso) —
+ * פורט מדויק של weighted_average_uv ב-bot_commands.py (ראו שם לרציונל
+ * המלא, כולל התקלה האמיתית ממצפה רמון ב-2026-09-08 שהובילה לתיקון:
+ * session ארוך שהוצג עם UV=0.0 כי nearestHourlyUv דגם נקודת-זמן בודדת
+ * שנפלה על שעת לילה, בעוד שהיה שיא UV אמיתי בצהריים). כל bucket שעתי
+ * (hourlyTimes[i]) מייצג את הטווח [t, t+1h); מחשבים חפיפה (במילישניות)
+ * עם [start, end) ומשקללים לפיה. calculateExposureScore לינארית
+ * ב-uvIndex, אז ממוצע-משוקלל-משך אחד שמוזן לנוסחה הקיימת שקול מתמטית
+ * לסכימת מנות-לפי-שעה, בלי לשנות את הנוסחה/חוזה ה-DB בכלל.
+ */
+export function weightedAverageUv(
+  hourlyTimes: string[],
+  hourlyUv: (number | null)[],
+  startTimeIso: string,
+  endTimeIso: string,
+): number | null {
+  if (!hourlyTimes || !hourlyUv || hourlyTimes.length === 0) return null;
+  const start = new Date(startTimeIso).getTime();
+  const end = new Date(endTimeIso).getTime();
+  const hourMs = 60 * 60 * 1000;
+
+  let totalWeight = 0;
+  let weightedSum = 0;
+  for (let i = 0; i < hourlyTimes.length; i++) {
+    const uv = hourlyUv[i];
+    if (typeof uv !== "number") continue;
+    const bucketStart = new Date(hourlyTimes[i]).getTime();
+    const bucketEnd = bucketStart + hourMs;
+    const overlapStart = Math.max(bucketStart, start);
+    const overlapEnd = Math.min(bucketEnd, end);
+    const overlapMs = overlapEnd - overlapStart;
+    if (overlapMs <= 0) continue;
+    weightedSum += uv * overlapMs;
+    totalWeight += overlapMs;
+  }
+  if (totalWeight <= 0) return null;
+  return weightedSum / totalWeight;
 }

@@ -154,19 +154,51 @@
   .stat-tile .value.status-serious { color: var(--status-serious); }
   .stat-tile .value.status-critical { color: var(--status-critical); }
 
-  /* bar chart */
+  /* horizontal exposure bars — one row per session, longest bar = highest
+     exposure score. שורות ולא עמודות, לפי בקשת המשתמש (2026-09-09):
+     row.hbar-row מסודרות בסדר יורד לפי score, כך שהשורה עם מדד החשיפה
+     הגבוה ביותר תמיד למעלה עם הפס הכי ארוך — "גדילה" חזותית ברורה.
+     .hbar-track מקבל direction:ltr במפורש (מבודד מה-RTL של שאר הדף)
+     כדי שהפס תמיד יגדל משמאל-לימין, כמו שביקש המשתמש — מוסכמה אוניברסלית
+     לבר-צ'ארטים אפילו בתוך ממשק RTL. */
   .chart-wrap { margin-top: 20px; }
-  .bars { display: flex; align-items: flex-end; gap: 2px; height: 180px; padding: 0 4px; position: relative; }
-  .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; position: relative; }
-  .bar {
-    width: 22px; max-width: 24px; border-radius: 4px 4px 0 0;
-    position: relative; cursor: pointer;
+  .hbars { display: flex; flex-direction: column; }
+  .hbar-row {
+    display: flex; flex-direction: column; gap: 5px;
+    padding: 10px 0; border-bottom: 1px solid var(--gridline);
+    position: relative; cursor: default;
   }
-  .bar-value { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
-  .bar-xlabel { font-size: 10.5px; color: var(--text-muted); margin-top: 8px; white-space: nowrap; }
-  .chart-baseline { border-top: 1px solid var(--baseline); }
+  .hbar-row:last-child { border-bottom: none; }
+  .hbar-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .hbar-label {
+    font-size: 12.5px; color: var(--text-secondary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .hbar-rank { color: var(--text-muted); font-variant-numeric: tabular-nums; margin-inline-end: 5px; }
+  .hbar-value {
+    font-size: 13px; font-weight: 700; flex: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .hbar-track {
+    direction: ltr; position: relative;
+    height: 11px; border-radius: 6px; background: var(--gridline);
+  }
+  .hbar-fill {
+    position: absolute; inset-inline-start: 0; top: 0; bottom: 0;
+    border-radius: 6px; min-width: 6px;
+    transition: width .55s cubic-bezier(.2,.7,.3,1);
+  }
+  .hbar-threshold {
+    position: absolute; top: -3px; bottom: -3px; width: 0;
+    border-inline-start: 1.5px dashed var(--baseline);
+  }
+  .hbar-threshold::after {
+    content: "100%"; position: absolute; top: -16px; inset-inline-start: 0;
+    transform: translateX(-50%); font-size: 9.5px; color: var(--text-muted);
+    white-space: nowrap;
+  }
 
-  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 16px; font-size: 12px; color: var(--text-secondary); }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 18px; font-size: 12px; color: var(--text-secondary); }
   .legend-item { display: flex; align-items: center; gap: 6px; }
   .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
 
@@ -176,11 +208,11 @@
     font-size: 11.5px; padding: 6px 9px; border-radius: 6px;
     white-space: nowrap; opacity: 0; pointer-events: none;
     transform: translateY(4px); transition: opacity .12s, transform .12s;
-    left: 50%; transform-origin: bottom center;
+    right: 0; transform-origin: bottom right; z-index: 2;
   }
-  .bar-col:hover .tooltip { opacity: 1; transform: translate(0,0); }
+  .hbar-row:hover .tooltip { opacity: 1; transform: translate(0,0); }
   .tooltip::after {
-    content: ""; position: absolute; top: 100%; left: 50%; margin-left: -4px;
+    content: ""; position: absolute; top: 100%; right: 12px;
     border: 4px solid transparent; border-top-color: var(--text-primary);
   }
 
@@ -263,7 +295,7 @@
     <div class="stat-grid" id="stat-grid"></div>
 
     <div class="chart-wrap">
-      <div class="bars" id="bars-container"></div>
+      <div class="hbars" id="bars-container"></div>
       <div class="legend" id="chart-legend"></div>
     </div>
 
@@ -606,27 +638,40 @@
       </div>
     `;
 
-    // --- Bar chart: exposure score per session ---
+    // --- Exposure bars: horizontal rows, sorted by score descending —
+    // ה-session עם מדד החשיפה הגבוה ביותר תמיד ראשון, עם הפס הכי ארוך.
+    // כל פס גדל משמאל-לימין (.hbar-track direction:ltr) בלי קשר לכיווניות
+    // RTL של שאר הדף — בקשת המשתמש, מוסכמה סטנדרטית לבר-צ'ארטים.
     const barsContainer = document.getElementById("bars-container");
     barsContainer.innerHTML = "";
     const maxScore = Math.max(100, ...scores);
-    sessions.forEach((s, i) => {
-      const score = scores[i];
-      const status = scoreToStatus(score);
-      const heightPct = Math.min(100, (score / maxScore) * 100);
+    const ranked = sessions
+      .map((s, i) => ({ session: s, score: scores[i] }))
+      .sort((a, b) => b.score - a.score);
 
-      const col = document.createElement("div");
-      col.className = "bar-col";
-      col.innerHTML = `
+    ranked.forEach((r, rank) => {
+      const { session: s, score } = r;
+      const status = scoreToStatus(score);
+      const widthPct = Math.min(100, (score / maxScore) * 100);
+      const thresholdPct = Math.min(100, (100 / maxScore) * 100);
+
+      const row = document.createElement("div");
+      row.className = "hbar-row";
+      row.innerHTML = `
         <div class="tooltip">
           ${s.city} · ${s.start}–${s.end}<br>
           UV ${s.uv.toFixed(1)} · חשיפה ${score}% · ${STATUS[status].label}
         </div>
-        <div class="bar-value">${score}%</div>
-        <div class="bar chart-baseline" style="height:${heightPct}%; background:${STATUS[status].color};"></div>
-        <div class="bar-xlabel">${s.start}</div>
+        <div class="hbar-meta">
+          <span class="hbar-label"><span class="hbar-rank">#${rank + 1}</span>${s.city} · ${s.start}–${s.end}</span>
+          <span class="hbar-value" style="color:${STATUS[status].color}">${score}%</span>
+        </div>
+        <div class="hbar-track">
+          <div class="hbar-fill" style="width:${widthPct}%; background:${STATUS[status].color};"></div>
+          ${thresholdPct < 100 ? `<div class="hbar-threshold" style="inset-inline-start:${thresholdPct}%"></div>` : ""}
+        </div>
       `;
-      barsContainer.appendChild(col);
+      barsContainer.appendChild(row);
     });
 
     // --- Legend ---

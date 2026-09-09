@@ -25,10 +25,10 @@ import {
   CORS_HEADERS,
   errorResponse,
   jsonResponse,
-  nearestHourlyUv,
   pastDaysFor,
   validateInitData,
   validateSessionShape,
+  weightedAverageUv,
 } from "./logic.ts";
 import type { OfflineSessionInput, RejectedItem, SubmitRequestBody } from "./logic.ts";
 
@@ -54,7 +54,18 @@ async function restGet(path: string): Promise<unknown[]> {
   return response.json();
 }
 
-async function fetchHistoricalUv(lat: number, lon: number, startTimeIso: string): Promise<number | null> {
+async function fetchHistoricalUv(
+  lat: number,
+  lon: number,
+  startTimeIso: string,
+  endTimeIso: string,
+): Promise<number | null> {
+  // past_days נגזר מ-startTimeIso בלבד (לא מ-endTimeIso) — ה-session
+  // כולו כבר בעבר (ולידציה קודמת: session בן יום אחד לכל היותר), ו-
+  // forecast_days=1 מכסה את כל שעות "היום" הנוכחי במידה ו-endTimeIso
+  // נופל בו. ראו weightedAverageUv/logic.ts לרציונל המלא של השינוי
+  // מ-nearestHourlyUv (דגימה בודדת) לממוצע-משוקלל-משך על פני כל הטווח —
+  // תיקון לתקלת מצפה רמון, 2026-09-08.
   const pastDays = pastDaysFor(startTimeIso);
   if (pastDays === null) return null; // מעל 92 יום אחורה — לא נתמך
 
@@ -70,7 +81,7 @@ async function fetchHistoricalUv(lat: number, lon: number, startTimeIso: string)
   const data = await resp.json();
   const times: string[] = data?.hourly?.time ?? [];
   const uvs: number[] = data?.hourly?.uv_index ?? [];
-  return nearestHourlyUv(times, uvs, startTimeIso);
+  return weightedAverageUv(times, uvs, startTimeIso, endTimeIso);
 }
 
 async function reverseGeocode(lat: number, lon: number): Promise<{ city: string; country: string | null }> {
@@ -111,9 +122,9 @@ async function processSession(
   const shapeError = validateSessionShape(session);
   if (shapeError) return { ok: false, reason: shapeError };
 
-  const uvIndex = await fetchHistoricalUv(session.start_lat, session.start_lon, session.start_time);
+  const uvIndex = await fetchHistoricalUv(session.start_lat, session.start_lon, session.start_time, session.end_time);
   if (uvIndex === null) {
-    return { ok: false, reason: "לא הצלחנו לשחזר נתוני UV להתחלת ה-session (ייתכן שהוא ישן מדי, מעל 92 יום)" };
+    return { ok: false, reason: "לא הצלחנו לשחזר נתוני UV ל-session הזה (ייתכן שהוא ישן מדי, מעל 92 יום)" };
   }
 
   const { city, country } = await reverseGeocode(session.start_lat, session.start_lon);
@@ -127,6 +138,8 @@ async function processSession(
     start_time: session.start_time,
     end_time: session.end_time,
     uv_index: uvIndex,
+    lat: session.start_lat,
+    lon: session.start_lon,
     spf: session.spf ?? null,
     exposure_score: score,
     client_uuid: session.client_uuid,
