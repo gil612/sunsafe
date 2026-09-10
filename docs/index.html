@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="0; url=dashboard/index.html">
+<title>SunSafe</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface-1: #fcfcfb;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --border: rgba(11,11,11,0.10);
+    --series-blue: #2a78d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface-1: #1a1a19;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --border: rgba(255,255,255,0.10);
+      --series-blue: #3987e5;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 40px 32px;
+    width: 100%;
+    max-width: 380px;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .emoji { font-size: 40px; margin-bottom: 8px; }
+  h1 { font-size: 22px; margin: 0 0 4px 0; }
+  p { color: var(--text-secondary); font-size: 14px; margin: 0 0 24px 0; }
+  a.btn {
+    display: inline-block;
+    background: var(--series-blue);
+    color: #fff;
+    text-decoration: none;
+    padding: 10px 20px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="emoji">☀️</div>
+    <h1>SunSafe</h1>
+    <p>מעביר אותך לאזור האישי...</p>
+    <a class="btn" href="dashboard/index.html">כניסה לאזור האישי</a>
+  </div>
+  <script>location.replace("dashboard/index.html");</script>
+</body>
+</html>
