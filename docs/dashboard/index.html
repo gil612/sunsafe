@@ -141,6 +141,73 @@
   }
   .badge-none { color: var(--text-muted); font-size: 12px; }
 
+  /* ---------- Session CRUD (הוספה/עריכה/מחיקה מתוך הדשבורד) ---------- */
+  /* נוסף 2026-09-12, כשהפעולות האלה עברו מהבוט לדשבורד. הכל בנוי על
+     ה-tokens הקיימים בלבד — בלי צבעים חדשים קשיחים, כך שמצב כהה עובד מעצמו. */
+  .head-actions { display: flex; align-items: center; gap: 8px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+    border: 1px solid var(--border); background: var(--page);
+    color: var(--text-secondary); font-size: 12.5px; padding: 7px 12px;
+    border-radius: 8px; cursor: pointer; font-family: inherit;
+  }
+  .btn:hover { color: var(--text-primary); border-color: var(--series-blue); }
+  .btn svg { width: 14px; height: 14px; flex: none; }
+  .btn-primary { background: var(--series-blue); border-color: var(--series-blue); color: #fff; }
+  .btn-primary:hover { color: #fff; opacity: 0.9; }
+  .btn-danger { color: var(--status-critical); }
+  .btn-danger:hover {
+    color: #fff; background: var(--status-critical); border-color: var(--status-critical);
+  }
+  .btn[disabled] { opacity: 0.55; cursor: default; }
+
+  /* פעולות בשורת טבלה — אייקונים בלבד, כדי לא למשוך תשומת לב מהנתונים עצמם */
+  td.row-actions { white-space: nowrap; }
+  .icon-btn {
+    border: none; background: none; cursor: pointer; padding: 4px 5px;
+    color: var(--text-muted); border-radius: 6px; line-height: 0;
+  }
+  .icon-btn:hover { background: var(--page); color: var(--text-primary); }
+  .icon-btn.danger:hover { color: var(--status-critical); }
+  .icon-btn svg { width: 15px; height: 15px; }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+    display: none; align-items: center; justify-content: center;
+    padding: 20px; z-index: 10;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: var(--card-radius); padding: 22px;
+    width: 100%; max-width: 420px; max-height: 90vh; overflow-y: auto;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.18);
+  }
+  .modal h3 { margin: 0 0 4px; font-size: 17px; }
+  .modal .modal-sub { margin: 0 0 16px; font-size: 12.5px; color: var(--text-muted); }
+  .field { margin-bottom: 13px; }
+  .field label {
+    display: block; font-size: 12px; color: var(--text-secondary);
+    margin-bottom: 5px; font-weight: 600;
+  }
+  .field input {
+    width: 100%; font-family: inherit; font-size: 14px; padding: 9px 11px;
+    border: 1px solid var(--border); border-radius: 9px;
+    background: var(--page); color: var(--text-primary);
+  }
+  .field input:focus { outline: 2px solid var(--series-blue); outline-offset: -1px; }
+  .field .hint { font-size: 11.5px; color: var(--text-muted); margin-top: 4px; }
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .modal-error {
+    display: none; font-size: 12.5px; color: var(--status-critical);
+    background: rgba(208,59,59,0.10); border-radius: 8px;
+    padding: 9px 11px; margin-bottom: 12px;
+  }
+  .modal-error.visible { display: block; }
+  .modal-actions { display: flex; gap: 8px; margin-top: 18px; }
+  .confirm-text { font-size: 13.5px; color: var(--text-secondary); line-height: 1.55; margin: 0 0 4px; }
+  .status-actions { margin-top: 18px; display: flex; justify-content: center; }
+
   /* stat tiles */
   .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
   .stat-tile {
@@ -280,6 +347,12 @@
     <div class="login-emoji" id="status-emoji">☀️</div>
     <h1 id="status-title">SunSafe</h1>
     <p class="tagline" id="status-message">מד חשיפה לשמש חכם</p>
+    <!-- מוצג רק כשהטוקן תקין אבל עוד אין sessions: בלי זה, משתמש חדש
+         היה תקוע במסך הזה בלי שום דרך לרשום session ראשון, כי ההוספה
+         כבר לא קיימת כפקודה בבוט. -->
+    <div class="status-actions" id="status-actions" style="display: none;">
+      <button class="btn btn-primary" id="empty-add-btn">➕ הוספת session ראשון</button>
+    </div>
   </div>
 </div>
 
@@ -337,12 +410,20 @@
         <h2>Sessions</h2>
         <p class="card-sub">בחרו תאריך כדי לראות את השהיות בשמש שנרשמו באותו יום</p>
       </div>
-      <button id="export-excel-btn" title="מוריד את כל ה-Sessions של המשתמש, כולל מדד החשיפה, לקובץ Excel">
-        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M10 2.5v10m0 0 3.5-3.5M10 12.5 6.5 9M3.5 14v2a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1v-2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        הורדת נתונים ל-Excel
-      </button>
+      <div class="head-actions">
+        <button class="btn btn-primary" id="add-session-btn" title="רישום ידני של session שכבר הסתיים">
+          <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M10 4.5v11M4.5 10h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          הוספת session
+        </button>
+        <button class="btn" id="export-excel-btn" title="מוריד את כל ה-Sessions של המשתמש, כולל מדד החשיפה, לקובץ Excel">
+          <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M10 2.5v10m0 0 3.5-3.5M10 12.5 6.5 9M3.5 14v2a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1v-2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          הורדת נתונים ל-Excel
+        </button>
+      </div>
     </div>
     <div class="date-pills" id="date-pills"></div>
     <table class="sessions">
@@ -355,6 +436,7 @@
           <th>משך</th>
           <th>UV</th>
           <th>קרם הגנה</th>
+          <th></th>
         </tr>
       </thead>
       <tbody id="sessions-body"></tbody>
@@ -362,6 +444,68 @@
   </div>
 
   <footer class="note">SunSafe · האזור האישי שלך — הקישור בתוקף ל-24 שעות מרגע היצירה</footer>
+</div>
+
+<!-- ============== SESSION FORM MODAL (הוספה / עריכה) ============== -->
+<div class="modal-backdrop" id="session-modal">
+  <div class="modal viz-root" role="dialog" aria-modal="true" aria-labelledby="session-modal-title">
+    <h3 id="session-modal-title">הוספת session</h3>
+    <p class="modal-sub" id="session-modal-sub">
+      רישום של שהייה בשמש שכבר הסתיימה. ה-UV ומדד החשיפה מחושבים אוטומטית בשרת.
+    </p>
+
+    <div class="modal-error" id="session-modal-error"></div>
+
+    <div class="field">
+      <label for="f-city">עיר</label>
+      <input type="text" id="f-city" placeholder="תל אביב" autocomplete="off">
+      <div class="hint">אפשר גם עיר עם מדינה, למשל "סן חוסה קוסטה ריקה"</div>
+    </div>
+
+    <div class="field">
+      <label for="f-date">תאריך</label>
+      <input type="date" id="f-date">
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label for="f-start">שעת התחלה</label>
+        <input type="time" id="f-start">
+      </div>
+      <div class="field">
+        <label for="f-end">שעת סיום</label>
+        <input type="time" id="f-end">
+      </div>
+    </div>
+    <div class="field">
+      <div class="hint">השעות נקראות לפי השעון המקומי של העיר שבחרתם, לא לפי שעון המכשיר שלכם.</div>
+    </div>
+
+    <div class="field">
+      <label for="f-spf">SPF (אופציונלי)</label>
+      <input type="number" id="f-spf" min="1" max="100" step="1" placeholder="למשל 30">
+      <div class="hint">להשאיר ריק אם לא נעשה שימוש בקרם הגנה</div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="session-save-btn">שמירה</button>
+      <button class="btn" id="session-cancel-btn">ביטול</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============== DELETE CONFIRMATION MODAL ============== -->
+<div class="modal-backdrop" id="delete-modal">
+  <div class="modal viz-root" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+    <h3 id="delete-modal-title">מחיקת session</h3>
+    <div class="modal-error" id="delete-modal-error"></div>
+    <p class="confirm-text" id="delete-modal-text">—</p>
+    <p class="confirm-text">הפעולה הזו לא ניתנת לביטול.</p>
+    <div class="modal-actions">
+      <button class="btn btn-danger" id="delete-confirm-btn">מחיקה</button>
+      <button class="btn" id="delete-cancel-btn">ביטול</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -376,6 +520,14 @@
   // ---------------------------------------------------------------
   const DASHBOARD_FUNCTION_URL =
     "https://wccueensecchmqfwdecw.supabase.co/functions/v1/dashboard-data";
+
+  // Edge Function הכתיבה — הוספה/עריכה/מחיקה של sessions (נוסף 2026-09-12,
+  // כשהפעולות האלה עברו מהבוט לדשבורד). הטוקן נשלח בגוף ה-POST ולא
+  // ב-query string: הוא כבר מאפשר כתיבה, וטוקן ב-URL דולף ללוגים
+  // ולהיסטוריית הדפדפן. ה-UV והציון תמיד מחושבים שם בשרת — הדף הזה
+  // לא שולח מספרים מחושבים ולא היה נסמך עליהם.
+  const SESSIONS_FUNCTION_URL =
+    "https://wccueensecchmqfwdecw.supabase.co/functions/v1/dashboard-sessions";
 
   const SKIN_TYPE_FACTOR = { 1: 0.5, 2: 0.75, 3: 1.0, 4: 1.5, 5: 2.5, 6: 4.0 };
 
@@ -392,11 +544,24 @@
     invalid_token: "הקישור הזה לא תקין. שלחו /dashboard לבוט כדי לקבל קישור חדש.",
     expired_token: "פג תוקף הקישור (בתוקף ל-24 שעות בלבד). שלחו /dashboard לבוט כדי לקבל קישור חדש.",
     server_error: "אירעה שגיאה בטעינת הנתונים. נסו שוב בעוד רגע.",
+    not_onboarded: "עוד לא הגדרתם סוג עור. שלחו /start לבוט קודם.",
+    city_not_found: "לא מצאנו את העיר הזו. נסו איות אחר, או הוסיפו את שם המדינה (למשל \"סן חוסה קוסטה ריקה\").",
+    uv_unavailable: "אין נתוני UV היסטוריים לתאריך הזה (הטווח הנתמך הוא 92 הימים האחרונים).",
+    session_not_found: "ה-session הזה כבר לא קיים. רעננו את הדף.",
+    invalid_session: "אחד הפרטים לא תקין. בדקו את העיר, התאריך והשעות.",
+    invalid_body: "הבקשה לא תקינה. רעננו את הדף ונסו שוב.",
   };
 
   let currentUser = null;
   let currentDate = null;
   let currentMonth = null;
+  // ה-Magic Link Token, נשמר אחרי טעינה מוצלחת כדי לצרף אותו לכל
+  // בקשת כתיבה (הוספה/עריכה/מחיקה) — ראו SESSIONS_FUNCTION_URL למעלה.
+  let currentToken = null;
+  // ה-id של ה-session שנמצא כרגע בעריכה, או null בהוספה חדשה.
+  let editingId = null;
+  // ה-session שממתין לאישור מחיקה.
+  let pendingDelete = null;
 
   const HEBREW_MONTHS = [
     "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני",
@@ -442,6 +607,9 @@
     document.getElementById("status-message").textContent = message;
     document.getElementById("login-screen").style.display = "flex";
     document.getElementById("dashboard").style.display = "none";
+    // כפתור "הוספת session ראשון" מוצג רק במצב הריק (ראו loadDashboard);
+    // איפוס כאן מונע ממנו להישאר על המסך אחרי טעינה מחדש או שגיאה.
+    document.getElementById("status-actions").style.display = "none";
   }
 
   function isoToLocalDateStr(iso) {
@@ -513,6 +681,7 @@
       username: body.telegram_username,
       skinType: body.skin_type,
       sessions: body.sessions.map((s) => ({
+        id: s.id,
         date: isoToLocalDateStr(s.start_time),
         city: s.city,
         country: s.country || "",
@@ -525,13 +694,20 @@
     };
 
     if (currentUser.sessions.length === 0) {
+      // אין sessions — אבל הטוקן תקין והמשתמש מוגדר, אז מציגים כאן גם
+      // כפתור הוספה. בלי זה משתמש חדש היה תקוע: מאז 2026-09-12 ההוספה
+      // הידנית כבר לא קיימת כפקודה בבוט, היא רק כאן.
+      currentToken = token;
       showStatus(
         "📋",
         "עדיין אין נתונים",
-        "לא נמצאו Sessions סגורים. שלחו /start_session לבוט כדי להתחיל למדוד חשיפה."
+        "לא נמצאו Sessions סגורים. אפשר לרשום כאן session שכבר היה, או לשלוח /start_session לבוט כדי למדוד חשיפה בזמן אמת."
       );
+      document.getElementById("status-actions").style.display = "flex";
       return;
     }
+
+    currentToken = token;
 
     showDashboard();
   }
@@ -832,10 +1008,192 @@
         <td>${dur} דק'</td>
         <td>${s.uv.toFixed(1)}</td>
         <td>${s.spf ? `<span class="badge-spf">SPF ${s.spf}</span>` : `<span class="badge-none">לא נעשה שימוש</span>`}</td>
+        <td class="row-actions">
+          <button class="icon-btn js-edit" title="עריכה" aria-label="עריכת session">
+            <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M13.5 3.5a1.77 1.77 0 0 1 2.5 2.5L7 15l-3.5 1L4.5 12.5l9-9Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button class="icon-btn danger js-delete" title="מחיקה" aria-label="מחיקת session">
+            <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M4 6h12M8.5 6V4.5h3V6M6 6l.7 9.5a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9L14 6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </td>
       `;
+      tr.querySelector(".js-edit").addEventListener("click", () => openEditModal(s));
+      tr.querySelector(".js-delete").addEventListener("click", () => openDeleteModal(s));
       body.appendChild(tr);
     });
   }
+
+  // ---------------------------------------------------------------
+  // Session CRUD — הוספה / עריכה / מחיקה מול dashboard-sessions.
+  // נוסף 2026-09-12: הפעולות האלה הוסרו מהבוט (/add_session,
+  // /edit_session, /delete_session) ועברו לכאן.
+  //
+  // כלל שחוזר בכל הפונקציות כאן: הדף לא מחשב ולא שולח UV או מדד חשיפה.
+  // הוא שולח רק את מה שהמשתמש הקליד (עיר, תאריך, שעות, SPF); ה-geocoding,
+  // שליפת ה-UV ההיסטורי והציון קורים בשרת בלבד.
+  // ---------------------------------------------------------------
+  async function callSessionsApi(payload) {
+    const response = await fetch(SESSIONS_FUNCTION_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: currentToken, ...payload }),
+    });
+    let body = {};
+    try { body = await response.json(); } catch (err) { /* גוף לא-JSON — נטופל למטה */ }
+    if (!response.ok) {
+      // הודעה ספציפית מהשרת (למשל "שעת הסיום לא יכולה להיות בעתיד")
+      // גוברת על ההודעה הגנרית לפי קוד השגיאה.
+      const message = body.message || ERROR_MESSAGES[body.error] || "אירעה שגיאה לא צפויה.";
+      throw new Error(message);
+    }
+    return body;
+  }
+
+  function showModalError(elementId, message) {
+    const box = document.getElementById(elementId);
+    box.textContent = message;
+    box.classList.toggle("visible", Boolean(message));
+  }
+
+  function setBusy(buttonId, busy, busyLabel, idleLabel) {
+    const btn = document.getElementById(buttonId);
+    btn.disabled = busy;
+    btn.textContent = busy ? busyLabel : idleLabel;
+  }
+
+  function openAddModal() {
+    editingId = null;
+    document.getElementById("session-modal-title").textContent = "הוספת session";
+    document.getElementById("session-modal-sub").textContent =
+      "רישום של שהייה בשמש שכבר הסתיימה. ה-UV ומדד החשיפה מחושבים אוטומטית בשרת.";
+    document.getElementById("f-city").value = "";
+    document.getElementById("f-date").value = new Date().toISOString().slice(0, 10);
+    document.getElementById("f-start").value = "";
+    document.getElementById("f-end").value = "";
+    document.getElementById("f-spf").value = "";
+    showModalError("session-modal-error", "");
+    document.getElementById("session-modal").classList.add("open");
+    document.getElementById("f-city").focus();
+  }
+
+  async function openEditModal(session) {
+    editingId = session.id;
+    document.getElementById("session-modal-title").textContent = "עריכת session";
+    document.getElementById("session-modal-sub").textContent =
+      "ה-UV ומדד החשיפה יחושבו מחדש בשרת לפי הפרטים המעודכנים.";
+    showModalError("session-modal-error", "");
+    document.getElementById("session-modal").classList.add("open");
+
+    // את הערכים מביאים מהשרת ולא מהטבלה: הטבלה מציגה שעות לפי ה-timezone
+    // של הדפדפן, בעוד שהטופס עובד בשעון המקומי *של העיר* — לערוך שדה אחד
+    // על סמך הערכים שבטבלה היה מזיז בשקט את השעות של session שהתרחש
+    // באזור זמן אחר.
+    setBusy("session-save-btn", true, "טוען...", "שמירה");
+    try {
+      const data = await callSessionsApi({ action: "read", id: session.id });
+      document.getElementById("f-city").value = data.city || "";
+      document.getElementById("f-date").value = data.date || "";
+      document.getElementById("f-start").value = data.start || "";
+      document.getElementById("f-end").value = data.end || "";
+      document.getElementById("f-spf").value = data.spf == null ? "" : data.spf;
+    } catch (err) {
+      showModalError("session-modal-error", err.message);
+    } finally {
+      setBusy("session-save-btn", false, "טוען...", "שמירה");
+    }
+  }
+
+  function closeSessionModal() {
+    document.getElementById("session-modal").classList.remove("open");
+    editingId = null;
+  }
+
+  async function saveSession() {
+    const spfRaw = document.getElementById("f-spf").value.trim();
+    const session = {
+      city: document.getElementById("f-city").value.trim(),
+      date: document.getElementById("f-date").value,
+      start: document.getElementById("f-start").value,
+      end: document.getElementById("f-end").value,
+      spf: spfRaw === "" ? null : Number(spfRaw),
+    };
+
+    // ולידציה מקומית זולה, רק כדי לא לשלוח בקשה שבטוח תיכשל. השרת
+    // מאמת הכל שוב בעצמו — זו נוחות, לא שכבת אבטחה.
+    if (!session.city) return showModalError("session-modal-error", "צריך להזין עיר.");
+    if (!session.date) return showModalError("session-modal-error", "צריך לבחור תאריך.");
+    if (!session.start || !session.end) return showModalError("session-modal-error", "צריך להזין שעת התחלה ושעת סיום.");
+    if (session.spf !== null && (!Number.isInteger(session.spf) || session.spf < 1 || session.spf > 100)) {
+      return showModalError("session-modal-error", "SPF צריך להיות מספר שלם בין 1 ל-100 (או ריק).");
+    }
+
+    showModalError("session-modal-error", "");
+    setBusy("session-save-btn", true, "שומר...", "שמירה");
+    try {
+      if (editingId === null) {
+        await callSessionsApi({ action: "create", session });
+      } else {
+        await callSessionsApi({ action: "update", id: editingId, session });
+      }
+      closeSessionModal();
+      await loadDashboard();
+    } catch (err) {
+      showModalError("session-modal-error", err.message);
+    } finally {
+      setBusy("session-save-btn", false, "שומר...", "שמירה");
+    }
+  }
+
+  function openDeleteModal(session) {
+    pendingDelete = session;
+    document.getElementById("delete-modal-text").textContent =
+      `למחוק את ה-session מ-${formatDate(session.date)} ב${session.city}, ${session.start}–${session.end}?`;
+    showModalError("delete-modal-error", "");
+    document.getElementById("delete-modal").classList.add("open");
+  }
+
+  function closeDeleteModal() {
+    document.getElementById("delete-modal").classList.remove("open");
+    pendingDelete = null;
+  }
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    setBusy("delete-confirm-btn", true, "מוחק...", "מחיקה");
+    try {
+      await callSessionsApi({ action: "delete", id: pendingDelete.id });
+      closeDeleteModal();
+      await loadDashboard();
+    } catch (err) {
+      showModalError("delete-modal-error", err.message);
+    } finally {
+      setBusy("delete-confirm-btn", false, "מוחק...", "מחיקה");
+    }
+  }
+
+  document.getElementById("add-session-btn").addEventListener("click", openAddModal);
+  document.getElementById("empty-add-btn").addEventListener("click", openAddModal);
+  document.getElementById("session-save-btn").addEventListener("click", saveSession);
+  document.getElementById("session-cancel-btn").addEventListener("click", closeSessionModal);
+  document.getElementById("delete-confirm-btn").addEventListener("click", confirmDelete);
+  document.getElementById("delete-cancel-btn").addEventListener("click", closeDeleteModal);
+
+  // לחיצה על הרקע סוגרת, וגם Escape — התנהגות מצופה מכל דיאלוג.
+  document.getElementById("session-modal").addEventListener("click", (e) => {
+    if (e.target.id === "session-modal") closeSessionModal();
+  });
+  document.getElementById("delete-modal").addEventListener("click", (e) => {
+    if (e.target.id === "delete-modal") closeDeleteModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    closeSessionModal();
+    closeDeleteModal();
+  });
 
   function renderAnalysis() {
     document.getElementById("analysis-date").textContent = formatDate(currentDate);
