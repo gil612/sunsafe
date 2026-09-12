@@ -386,25 +386,6 @@
   </div>
 
   <div class="card">
-    <h2>ניתוח חודשי — <span id="month-label">—</span></h2>
-    <p class="card-sub">מגמת חשיפה מצטברת לאורך החודש (סכום מדדי החשיפה היומיים, יום אחר יום)</p>
-
-    <div class="date-pills" id="month-pills"></div>
-
-    <div class="stat-grid" id="month-stat-grid"></div>
-
-    <div class="month-chart-wrap">
-      <svg id="month-chart-svg" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
-      <div class="month-tooltip" id="month-tooltip"></div>
-    </div>
-
-    <div class="feedback-box">
-      <div class="fb-title">💡 סיכום החודש</div>
-      <div id="month-feedback-text">—</div>
-    </div>
-  </div>
-
-  <div class="card">
     <div class="card-head-row">
       <div>
         <h2>Sessions</h2>
@@ -441,6 +422,29 @@
       </thead>
       <tbody id="sessions-body"></tbody>
     </table>
+  </div>
+
+  <!-- הניתוח החודשי יושב מתחת לטבלת ה-Sessions (הועבר לכאן 2026-09-12,
+       לבקשת המשתמש): הזרימה הטבעית בדף היא היום הנבחר -> ה-sessions של
+       אותו יום -> ורק אז המבט הרחב על החודש כולו. סדר ה-DOM לא משפיע על
+       שום דבר בקוד — כל הרינדור עובד לפי id. -->
+  <div class="card">
+    <h2>ניתוח חודשי — <span id="month-label">—</span></h2>
+    <p class="card-sub">מגמת חשיפה מצטברת לאורך החודש (סכום מדדי החשיפה היומיים, יום אחר יום)</p>
+
+    <div class="date-pills" id="month-pills"></div>
+
+    <div class="stat-grid" id="month-stat-grid"></div>
+
+    <div class="month-chart-wrap">
+      <svg id="month-chart-svg" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
+      <div class="month-tooltip" id="month-tooltip"></div>
+    </div>
+
+    <div class="feedback-box">
+      <div class="fb-title">💡 סיכום החודש</div>
+      <div id="month-feedback-text">—</div>
+    </div>
   </div>
 
   <footer class="note">SunSafe · האזור האישי שלך — הקישור בתוקף ל-24 שעות מרגע היצירה</footer>
