@@ -292,16 +292,61 @@ export function validateResolvedTimes(
   return null;
 }
 
+/** חלון סבילות לשעון לא מסונכרן בין המכשיר לשרת. */
+const CLOCK_SKEW_MS = 5 * 60 * 1000;
+
 /**
- * מטפלת בחציית חצות: אם end <= start באותו יום, ה-session נמשך אל תוך
- * היום הבא (למשל 23:30 -> 00:45). מחזירה את ה-end כשהוא כבר מוזז ביום
- * אחד במידת הצורך. זהה בהתנהגות ל-/add_session.
+ * מקבלת את שני הזמנים אחרי ההמרה ל-UTC ומחזירה את הטווח הסופי, או
+ * הודעת שגיאה בעברית להצגה למשתמש.
+ *
+ * כאן מרוכזות שלוש ההחלטות שהיו מפוזרות קודם (בדיקת עתיד, חציית חצות,
+ * ולידציה) — כי הן תלויות זו בזו, ובגרסה הראשונה הסדר ביניהן הפיק
+ * הודעה שמצביעה על השדה הלא נכון. המקרה האמיתי שחשף את זה, 2026-09-12:
+ * משתמש הזין בטלפון start=10:00 PM ו-end=12:29 PM (התכוון ל-10:00 AM —
+ * בלבול נפוץ בבוחר השעה של אנדרואיד). הקוד הסיק "חצה חצות", הזיז את
+ * הסיום ליום הבא, וענה "שעת הסיום לא יכולה להיות בעתיד" — נכון
+ * טכנית, אבל שולח את המשתמש לתקן בדיוק את השדה שלא היה בעייתי.
+ *
+ * לכן: קודם בודקים את *ההתחלה* (אם היא בעתיד, זו הבעיה האמיתית והיא
+ * מוסברת ישירות), ורק אחר כך שוקלים חציית חצות — ומיישמים אותה רק אם
+ * התוצאה לא נופלת בעתיד. session שאחרי ההזזה מסתיים "מחר" הוא כמעט
+ * תמיד טעות AM/PM ולא שהייה שנמשכה אל תוך הלילה.
  */
-export function shiftEndPastMidnight(startIso: string, endIso: string): string {
+export function resolveSessionTimes(
+  startIso: string,
+  endRawIso: string,
+  now: Date = new Date(),
+): { startIso: string; endIso: string } | { message: string } {
   const start = new Date(startIso).getTime();
-  const end = new Date(endIso).getTime();
-  if (end > start) return endIso;
-  return new Date(end + 24 * 60 * 60 * 1000).toISOString();
+  const endRaw = new Date(endRawIso).getTime();
+  if (Number.isNaN(start) || Number.isNaN(endRaw)) {
+    return { message: "התאריך או השעות לא תקינים" };
+  }
+
+  const latestAllowed = now.getTime() + CLOCK_SKEW_MS;
+
+  if (start > latestAllowed) {
+    return {
+      message: "שעת ההתחלה שהזנתם היא בעתיד. בדקו את התאריך, " +
+        "ואם בוחר השעה שלכם מציג AM/PM — שגם זה נבחר נכון.",
+    };
+  }
+
+  let endIso = endRawIso;
+  if (endRaw <= start) {
+    const shifted = endRaw + 24 * 60 * 60 * 1000;
+    if (shifted > latestAllowed) {
+      return {
+        message: "שעת הסיום מוקדמת משעת ההתחלה. אם ה-session לא חצה חצות, " +
+          "בדקו את AM/PM בשתי השעות.",
+      };
+    }
+    endIso = new Date(shifted).toISOString();
+  }
+
+  const error = validateResolvedTimes(startIso, endIso, now);
+  if (error) return { message: error };
+  return { startIso, endIso };
 }
 
 /**

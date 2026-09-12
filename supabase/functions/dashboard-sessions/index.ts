@@ -31,11 +31,10 @@ import {
   jsonResponse,
   localWallClockToUtcIso,
   pastDaysFor,
-  shiftEndPastMidnight,
+  resolveSessionTimes,
   textMatches,
   utcIsoToLocalWallClock,
   validateRequest,
-  validateResolvedTimes,
   weightedAverageUv,
 } from "./logic.ts";
 import type { RequestBody, SessionPayload } from "./logic.ts";
@@ -225,15 +224,15 @@ async function buildSessionRow(
   if (!geo) return { error: "city_not_found" };
 
   const utcOffsetSeconds = await fetchUtcOffsetSeconds(geo.latitude, geo.longitude);
-  const startIso = localWallClockToUtcIso(session.date!, session.start!, utcOffsetSeconds);
+  const startRawIso = localWallClockToUtcIso(session.date!, session.start!, utcOffsetSeconds);
   const endRawIso = localWallClockToUtcIso(session.date!, session.end!, utcOffsetSeconds);
-  if (!startIso || !endRawIso) return { message: "התאריך או השעות לא תקינים" };
+  if (!startRawIso || !endRawIso) return { message: "התאריך או השעות לא תקינים" };
 
-  // end לפני start באותו יום = חציית חצות, בדיוק כמו ב-/add_session.
-  const endIso = shiftEndPastMidnight(startIso, endRawIso);
-
-  const timeError = validateResolvedTimes(startIso, endIso);
-  if (timeError) return { message: timeError };
+  // בדיקת עתיד + חציית חצות + ולידציה, במקום אחד ובסדר הנכון —
+  // ראו resolveSessionTimes ב-logic.ts לרציונל (כולל תקלת ה-AM/PM).
+  const resolved = resolveSessionTimes(startRawIso, endRawIso);
+  if ("message" in resolved) return { message: resolved.message };
+  const { startIso, endIso } = resolved;
 
   const uvIndex = await fetchHistoricalUv(geo.latitude, geo.longitude, startIso, endIso);
   if (uvIndex === null) return { error: "uv_unavailable" };
