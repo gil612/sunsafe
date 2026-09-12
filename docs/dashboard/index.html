@@ -677,21 +677,7 @@
       return;
     }
 
-    currentUser = {
-      username: body.telegram_username,
-      skinType: body.skin_type,
-      sessions: body.sessions.map((s) => ({
-        id: s.id,
-        date: isoToLocalDateStr(s.start_time),
-        city: s.city,
-        country: s.country || "",
-        start: isoToLocalTimeStr(s.start_time),
-        end: isoToLocalTimeStr(s.end_time),
-        uv: s.uv_index,
-        spf: s.spf,
-        serverScore: s.exposure_score,
-      })),
-    };
+    currentUser = mapDashboardBody(body);
 
     if (currentUser.sessions.length === 0) {
       // אין sessions — אבל הטוקן תקין והמשתמש מוגדר, אז מציגים כאן גם
@@ -710,6 +696,98 @@
     currentToken = token;
 
     showDashboard();
+  }
+
+  /** תשובת dashboard-data -> המודל שהדף עובד איתו. משותף לטעינה הראשונה
+   *  ולרענון שקט אחרי שינוי (reloadAfterChange), כדי שהמיפוי לא יתפצל. */
+  function mapDashboardBody(body) {
+    return {
+      username: body.telegram_username,
+      skinType: body.skin_type,
+      sessions: body.sessions.map((s) => ({
+        id: s.id,
+        date: isoToLocalDateStr(s.start_time),
+        city: s.city,
+        country: s.country || "",
+        start: isoToLocalTimeStr(s.start_time),
+        end: isoToLocalTimeStr(s.end_time),
+        uv: s.uv_index,
+        spf: s.spf,
+        serverScore: s.exposure_score,
+      })),
+    };
+  }
+
+  /**
+   * רענון אחרי הוספה/עריכה/מחיקה — שולף מחדש מהשרת (הוא מקור האמת,
+   * מדד החשיפה מחושב שם), אבל מרנדר *במקום* במקום לעבור דרך
+   * loadDashboard: בלי מסך הטעינה, ועם שמירה על התאריך והחודש שנבחרו.
+   *
+   * הגרסה הראשונה (2026-09-12) קראה פשוט ל-loadDashboard, וזה נראה כמו
+   * רענון מלא של הדף — וגזר גם אובדן מקום: showDashboard מאפס את
+   * הבחירה לתאריך האחרון, כך שמי שמחק session מ-08.09 מצא את עצמו
+   * חוזר ל-11.09.
+   *
+   * כל תקלה (רשת, טוקן שפג, מצב ריק) נופלת בכוונה חזרה ל-loadDashboard,
+   * שיודע להציג את המסכים האלה כמו שצריך — עדיף מסך שגיאה תקין מעל
+   * רענון-במקום שנתקע עם נתונים ישנים.
+   */
+  async function reloadAfterChange() {
+    const token = new URLSearchParams(window.location.search).get("token");
+    if (!token) return loadDashboard();
+
+    let body;
+    try {
+      const response = await fetch(`${DASHBOARD_FUNCTION_URL}?token=${encodeURIComponent(token)}`);
+      body = await response.json();
+      if (!response.ok || !body.onboarded) return loadDashboard();
+    } catch (err) {
+      return loadDashboard();
+    }
+
+    const previousDate = currentDate;
+    const previousMonth = currentMonth;
+    currentUser = mapDashboardBody(body);
+
+    // נמחק ה-session האחרון שהיה — המצב הריק הוא מסך נפרד (עם כפתור
+    // הוספה), אז נותנים ל-loadDashboard להציג אותו.
+    if (currentUser.sessions.length === 0) return loadDashboard();
+
+    const dates = [...new Set(currentUser.sessions.map(s => s.date))].sort().reverse();
+    currentDate = nearestRemaining(previousDate, dates);
+    renderDatePills(dates);
+    renderSessionsTable();
+    renderAnalysis();
+
+    const months = [...new Set(dates.map(d => d.slice(0, 7)))].sort().reverse();
+    currentMonth = nearestRemaining(previousMonth, months);
+    renderMonthPills(months);
+    renderMonthlyAnalysis();
+  }
+
+  /**
+   * שומרת על הבחירה הקודמת אם היא עוד קיימת; אחרת בוחרת את הקרובה
+   * אליה בזמן (ולא סתם את האחרונה) — מחיקת ה-session היחיד של 08.09
+   * תעביר ל-07.09 או ל-09.09, לא תזרוק לקצה הרשימה. שוויון מרחק ->
+   * המאוחר מהשניים.
+   * מקבלת גם תאריכים ("YYYY-MM-DD") וגם חודשים ("YYYY-MM").
+   */
+  function nearestRemaining(previous, available) {
+    if (!available.length) return null;
+    if (!previous || available.includes(previous)) return previous || available[0];
+
+    const toTime = (key) => Date.parse((key.length === 7 ? `${key}-01` : key) + "T00:00:00Z");
+    const target = toTime(previous);
+    let best = available[0];
+    let bestDiff = Infinity;
+    for (const value of available) {
+      const diff = Math.abs(toTime(value) - target);
+      if (diff < bestDiff || (diff === bestDiff && value > best)) {
+        bestDiff = diff;
+        best = value;
+      }
+    }
+    return best;
   }
 
   // ---------------------------------------------------------------
@@ -1140,7 +1218,7 @@
         await callSessionsApi({ action: "update", id: editingId, session });
       }
       closeSessionModal();
-      await loadDashboard();
+      await reloadAfterChange();
     } catch (err) {
       showModalError("session-modal-error", err.message);
     } finally {
@@ -1167,7 +1245,7 @@
     try {
       await callSessionsApi({ action: "delete", id: pendingDelete.id });
       closeDeleteModal();
-      await loadDashboard();
+      await reloadAfterChange();
     } catch (err) {
       showModalError("delete-modal-error", err.message);
     } finally {
