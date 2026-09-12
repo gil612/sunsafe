@@ -230,9 +230,16 @@ with patch.object(bc, "send_message", fake_send_message), \
     check("handle_edit_session: no end/spf given -> usage-style error, no update", len(updated) == 0 and "לפחות" in sent_messages[0], f"-> {sent_messages}")
 
 # ---------------------------------------------------------------------
-# 10) COMMAND_HANDLERS: /edit_session רשום נכון
+# 10) COMMAND_HANDLERS: /edit_session מפנה לדשבורד
 # ---------------------------------------------------------------------
-check("COMMAND_HANDLERS: /edit_session registered", bc.COMMAND_HANDLERS.get("/edit_session") is bc.handle_edit_session)
+# מ-2026-09-12 העריכה עברה לדשבורד: הפקודה עדיין מוכרת לבוט, אבל ממופה
+# ל-handle_moved_to_dashboard (שמחזיר קישור לאזור האישי) במקום לערוך
+# בעצמה. הלוגיקה של handle_edit_session עצמה עדיין נבדקת בכל שאר הקובץ —
+# היא נשמרה כדי שהמעבר יהיה הפיך.
+check(
+    "COMMAND_HANDLERS: /edit_session now redirects to the dashboard",
+    bc.COMMAND_HANDLERS.get("/edit_session") is bc.handle_moved_to_dashboard,
+)
 
 
 print()

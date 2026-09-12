@@ -28,6 +28,38 @@ from bot_commands import auto_close_expired_sessions_forever, poll_forever
 
 logger = logging.getLogger("sunsafe.hf_space")
 
+
+# ---------------------------------------------------------------------
+# ZeroGPU compliance probe
+# ---------------------------------------------------------------------
+# ה-Space רץ על חומרת ZeroGPU, ו-HF דורש שכל Space כזה יכיל *לפחות
+# פונקציה אחת* מסומנת ב-@spaces.GPU. בלי זה ההרצה נכשלת עם
+# "No @spaces.GPU function detected during startup" וה-container נהרג
+# תוך שניות מהעלייה — מה שראינו בפועל ב-2026-09-12: הבוט עלה, הספיק
+# לקלוט הודעה אחת ("מה ה-UV בהונולולו?"), ונהרג באמצע עיבודה לפני
+# שהספיק לענות. מבחוץ זה נראה בדיוק כמו "הבוט לא עובד".
+#
+# SunSafe עצמו לא צריך GPU בכלל (קריאות רשת + Gemini API חיצוני בלבד,
+# בלי שום inference מקומי) — הפונקציה הזו היא no-op שקיימת אך ורק כדי
+# לעמוד בדרישה הפורמלית הזו, ולעולם לא נקראת בזרימה האמיתית. הפתרון
+# ה"נכון" יותר היה להוריד את ה-Space חזרה ל-CPU basic, אבל HF חוסם
+# את השינוי הזה בלי מנוי PRO.
+#
+# ה-import עטוף ב-try: חבילת spaces מותקנת אוטומטית רק על חומרת ZeroGPU
+# ב-HF, ולא קיימת בהרצה מקומית — שם פשוט מדלגים, בלי להפיל את הבוט.
+try:
+    import spaces
+
+    @spaces.GPU
+    def _zerogpu_startup_probe() -> str:
+        """no-op — קיימת רק כדי לספק ל-ZeroGPU פונקציה מסומנת. ראו ההערה למעלה."""
+        return "ok"
+
+    logger.info("ZeroGPU probe registered (@spaces.GPU)")
+except ImportError:
+    logger.info("spaces package unavailable — skipping ZeroGPU probe (expected outside HF ZeroGPU hardware)")
+
+
 _bot_thread_started = False
 _start_lock = threading.Lock()
 

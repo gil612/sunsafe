@@ -253,8 +253,14 @@ with patch.object(bc, "send_message", fake_send_message), \
     else:
         check("add_session: date= year-rollback when date is in the future", False, f"-> no row inserted, messages={sent_messages}")
 
-    # /my_sessions dispatch רשום נכון
-    check("COMMAND_HANDLERS: /add_session registered", bc.COMMAND_HANDLERS.get("/add_session") is bc.handle_add_session)
+    # מ-2026-09-12 ההוספה עברה לדשבורד: הפקודה עדיין מוכרת לבוט, אבל
+    # ממופה ל-handle_moved_to_dashboard (שמחזיר קישור לאזור האישי) במקום
+    # לרשום session בעצמה. הלוגיקה של handle_add_session עצמה עדיין
+    # נבדקת בכל שאר הקובץ — היא נשמרה כדי שהמעבר יהיה הפיך.
+    check(
+        "COMMAND_HANDLERS: /add_session now redirects to the dashboard",
+        bc.COMMAND_HANDLERS.get("/add_session") is bc.handle_moved_to_dashboard,
+    )
 
 
 # ---------------------------------------------------------------------
