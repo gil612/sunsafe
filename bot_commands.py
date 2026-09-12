@@ -20,6 +20,7 @@ SDK נוסף, עקבי עם שאר הקוד.
 import io
 import logging
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,21 @@ from skin_damage_classifier import (
     validate_classification as validate_damage_classification,
 )
 from supabase_client import SupabaseError, delete_rows, insert_row, select_rows, update_rows, upsert_row
+from geo_uv_core import (
+    calculate_exposure_score,
+    geocode_city,
+    get_current_uv,
+    _nominatim_forward_geocode,
+    _text_matches,
+    GEOCODING_URL,
+    NOMINATIM_SEARCH_URL,
+)
+from message_gatekeeper import classify_message
+# ניתוב הודעות-טקסט חופשיות (לא פקודה מוכרת, אבל לא NOISE) ל-Agent Loop
+# דרך MCP — אותו run() בדיוק ש-send_uv_report.py כבר משתמש בו, ראו
+# _handle_freeform_question למטה. שם ה-import (run_agent_via_mcp, לא run
+# הגולמי) כדי לא להתנגש עם import time הקיים ולהיות ברור בנקודת הקריאה.
+from mcp_agent_loop import run as run_agent_via_mcp
 
 load_dotenv()
 
@@ -67,51 +83,16 @@ SESSION_MINIAPP_URL = os.environ.get("SESSION_MINIAPP_URL", "http://localhost:80
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
-GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 
 # Reverse geocoding (lat/lon -> שם עיר) לשיתוף מיקום מהטלפון. Open-Meteo
-# (המקור ל-geocode_city למטה) תומך רק ב-forward geocoding — אין לו נתיב
-# reverse, לכן Nominatim (OpenStreetMap): חינמי, בלי מפתח API. חובה
-# User-Agent מזהה ומקסימום בקשה/שנייה לפי ה-Usage Policy הרשמי — לא
-# בעיה בפועל כאן כי יש לכל היותר קריאה אחת לכל /start_session.
+# (המקור ל-geocode_city ב-geo_uv_core.py) תומך רק ב-forward geocoding —
+# אין לו נתיב reverse, לכן Nominatim (OpenStreetMap): חינמי, בלי מפתח
+# API. חובה User-Agent מזהה ומקסימום בקשה/שנייה לפי ה-Usage Policy
+# הרשמי — לא בעיה בפועל כאן כי יש לכל היותר קריאה אחת לכל /start_session.
 NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
-# Forward geocoding — שכבת גיבוי ל-geocode_city (ראו שם) כשל-Open-Meteo/
-# GeoNames אין בכלל רשומת-שם בעברית לעיר (לא רק שגיאת איות: "סן חוזה"
-# ו"סן חוסה" - שתי הצורות - נכשלו שתיהן ב-Open-Meteo ב-2026-09-08).
-# OpenStreetMap הוא מאגר קהילתי גדול משמעותית מ-GeoNames, עם כיסוי
-# שמות רב-לשוני עשיר יותר לערים זרות פחות-מוכרות — לא הבטחה, רק כיסוי
-# רחב יותר. עדיין בלי תיקון-טעויות-הקלדה אמיתי (edit distance) כמו
-# Google — זה נשאר מחוץ לתקציב של הפרויקט (ראה השיחה מ-2026-09-08).
-NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_USER_AGENT = "SunSafe-Bot/1.0 (student course project)"
 
 LINK_TTL_MINUTES = 60 * 24  # 24 שעות — נוח לשימוש חוזר בלי לוותר על תפוגה
-
-# זהה לנוסחה ב-README/דף ההדגמה/calculate_exposure_score.
-SKIN_TYPE_FACTOR = {1: 0.5, 2: 0.75, 3: 1.0, 4: 1.5, 5: 2.5, 6: 4.0}
-
-
-# ---------------------------------------------------------------------
-# Exposure score (עותק מקומי טהור — בלי תלות ב-Agent Loop, כי הפקודות
-# האלה דטרמיניסטיות ולא דורשות LLM כדי "להבין" אותן)
-# ---------------------------------------------------------------------
-def effective_spf(labeled_spf: int | None) -> float:
-    if not labeled_spf:
-        return 1.0
-    return 1 + (labeled_spf - 1) * 0.4
-
-
-def calculate_exposure_score(uv_index: float, duration_minutes: float, skin_type: int, spf: int | None) -> int:
-    # UV=0 (למשל session שנפתח בלילה) הוא ערך תקין לגמרי, לא שגיאה — אבל
-    # 200/uv_index עם 0 קורס ב-ZeroDivisionError. בלי חשיפה ל-UV בכלל
-    # הסיכון הוא אפס, ללא תלות במשך הזמן, אז מחזירים 0 ישירות. באג אמיתי
-    # שתפס session תקוע (id=38, UV=0) — ראה השיחה מ-31.8.2026.
-    if uv_index <= 0:
-        return 0
-    factor = SKIN_TYPE_FACTOR.get(skin_type, 1.0)
-    protection = effective_spf(spf)
-    safe_minutes = (200 / uv_index) * factor * protection
-    return round((duration_minutes / safe_minutes) * 100)
 
 
 # ---------------------------------------------------------------------
@@ -169,137 +150,10 @@ def _peak_exposure_session(sessions: list[dict]) -> dict | None:
 
 
 # ---------------------------------------------------------------------
-# Open-Meteo — geocoding + UV (עותק מקומי, מקביל ל-mcp_weather_server.py;
-# הכלים שם עטופים ב-@mcp.tool ולא נוחים לייבוא ישיר מסקריפט חיצוני)
+# Nominatim — reverse geocoding (lat/lon -> שם עיר) לשיתוף מיקום מהטלפון.
+# geocode_city/get_current_uv (forward geocoding + UV) עברו ל-geo_uv_core.py
+# (ייבוא למעלה) — זה לא היה כפול באף מקום אחר, אז נשאר מקומי כאן.
 # ---------------------------------------------------------------------
-def _raw_geocode_search(client: httpx.Client, name: str, count: int = 1) -> list[dict]:
-    """קריאה גולמית ל-Open-Meteo Geocoding — מחזירה עד `count` מועמדים גולמיים."""
-    response = client.get(
-        GEOCODING_URL,
-        params={"name": name, "count": count, "language": "he", "format": "json"},
-        timeout=10.0,
-    )
-    response.raise_for_status()
-    results = response.json().get("results") or []
-    return [
-        {
-            "name": r.get("name"),
-            "country": r.get("country"),
-            "latitude": r.get("latitude"),
-            "longitude": r.get("longitude"),
-        }
-        for r in results
-    ]
-
-
-def _text_matches(hint: str, value: str | None) -> bool:
-    """
-    התאמת טקסט "רכה" בין country_hint שהמשתמש הקליד לבין שדה country
-    שחזר מ-Open-Meteo — בלי תלות במקף/גרשיים, ובכיוון הכלה כלשהו (כך
-    ש"ארה\"ב" יתאים גם ל"ארצות הברית" אם אחד מהם מוכל במשנהו, לא רק
-    שוויון מדויק).
-    """
-    if not value or not hint:
-        return False
-    normalize = lambda s: s.strip().replace("-", " ").replace("״", "").replace('"', "")
-    hint_n, value_n = normalize(hint), normalize(value)
-    return bool(hint_n) and (hint_n in value_n or value_n in hint_n)
-
-
-def _nominatim_forward_geocode(client: httpx.Client, city_name: str) -> dict:
-    """
-    שכבת גיבוי ל-geocode_city (למטה) — נקראת רק אחרי ש-Open-Meteo/
-    GeoNames נכשל לגמרי (גם התאמה ישירה וגם כל פיצול עיר/מדינה). מריצה
-    חיפוש טקסט-חופשי (q=) מול Nominatim, שם המחרוזת כולה (כולל ציון-
-    מדינה אם יש, למשל "סן חוסה קוסטה ריקה") נכנסת כמו שהיא — Nominatim
-    כבר יודע לפרש "עיר, מדינה" בעצמו, אז אין צורך בלוגיקת הפיצול
-    שקיימת למעלה בשביל Open-Meteo.
-
-    לא זורקת אם אין תוצאות/כתובת — מחזירה found=False, אותו חוזה בדיוק
-    כמו geocode_city ו-reverse_geocode_location.
-    """
-    response = client.get(
-        NOMINATIM_SEARCH_URL,
-        params={"q": city_name, "format": "json", "accept-language": "he", "limit": 1, "addressdetails": 1},
-        headers={"User-Agent": NOMINATIM_USER_AGENT},
-        timeout=10.0,
-    )
-    response.raise_for_status()
-    results = response.json() or []
-    if not results:
-        return {"found": False}
-
-    result = results[0]
-    address = result.get("address") or {}
-    name = (
-        address.get("city")
-        or address.get("town")
-        or address.get("village")
-        or address.get("municipality")
-        or address.get("county")
-        or result.get("name")
-    )
-    try:
-        latitude, longitude = float(result["lat"]), float(result["lon"])
-    except (KeyError, TypeError, ValueError):
-        return {"found": False}
-    if not name:
-        return {"found": False}
-
-    return {"found": True, "name": name, "country": address.get("country"), "latitude": latitude, "longitude": longitude}
-
-
-def geocode_city(client: httpx.Client, city_name: str) -> dict:
-    """
-    מזהה עיר לפי שם חופשי. קודם מנסים את המחרוזת המלאה כמו שהיא — המקרה
-    השכיח, שם עיר יחיד כמו "תל אביב". אם זה נכשל וישנן כמה מילים, כנראה
-    שם העיר מלווה בציון מדינה (כמו "סן חוזה קוסטה ריקה" — כדי להבדיל
-    מ-San Jose שבארה"ב, שהיא עיר גדולה יותר ותקבל עדיפות בברירת המחדל
-    של Open-Meteo לפי אוכלוסייה). ל-Open-Meteo אין פרמטר סינון-לפי-מדינה
-    נפרד, אז מפצלים את המחרוזת לחלק-עיר וחלק-מדינה (1 עד 3 המילים
-    האחרונות — מכסה גם מדינות דו-מילתיות כמו "קוסטה ריקה"), שולפים כמה
-    מועמדים לחלק-העיר, ובודקים איזה מהם ה-country שלו תואם את חלק-המדינה.
-
-    אם גם זה נכשל — לפני שמוותרים לגמרי, מנסים Nominatim
-    (_nominatim_forward_geocode) כשכבה שלישית: מקרה אמיתי שנתקלנו בו
-    ב-2026-09-08 — "סן חוסה קוסטה ריקה" (וגם האיות "סן חוזה") לא נמצא
-    ב-Open-Meteo/GeoNames בשום איות ובשום פיצול, כי ל-GeoNames פשוט אין
-    בכלל שם עברי רשום לעיר הזו (לא רק בעיית-איות — Open-Meteo לא עושה
-    שום fuzzy/typo matching, בשונה מ-Google). Nominatim (OpenStreetMap,
-    כבר בשימוש כאן ל-reverse_geocode_location) הוא מאגר קהילתי גדול
-    יותר עם כיסוי רב-לשוני עשיר יותר — לא הבטחה לכל עיר, אבל שכבת גיבוי
-    חינמית וסבירה לפני "לא נמצא".
-
-    בלי התאמה בשום שכבה — "לא נמצא", בלי לנחש עיר שגויה בשקט.
-    """
-    results = _raw_geocode_search(client, city_name, count=1)
-    if results:
-        return {"found": True, **results[0]}
-
-    tokens = city_name.strip().split()
-    for suffix_len in (1, 2, 3):
-        if len(tokens) <= suffix_len:
-            break
-        city_part = " ".join(tokens[:-suffix_len])
-        country_hint = " ".join(tokens[-suffix_len:])
-        candidates = _raw_geocode_search(client, city_part, count=10)
-        match = next((c for c in candidates if _text_matches(country_hint, c.get("country"))), None)
-        if match:
-            return {"found": True, **match}
-
-    return _nominatim_forward_geocode(client, city_name)
-
-
-def get_current_uv(client: httpx.Client, lat: float, lon: float) -> float:
-    response = client.get(
-        OPEN_METEO_URL,
-        params={"latitude": lat, "longitude": lon, "current": "uv_index"},
-        timeout=10.0,
-    )
-    response.raise_for_status()
-    return response.json()["current"]["uv_index"]
-
-
 def reverse_geocode_location(client: httpx.Client, lat: float, lon: float) -> dict:
     """
     הופך lat/lon (משיתוף מיקום בטלגרם) לשם עיר, דרך Nominatim. ה-address
@@ -341,6 +195,7 @@ def send_message(chat_id: int, text: str, reply_markup: dict | None = None) -> N
             timeout=10.0,
         )
         response.raise_for_status()
+    _mirror_outgoing_to_admin(chat_id, text)
 
 
 def send_photo(chat_id: int, photo_bytes: bytes, caption: str | None = None) -> None:
@@ -357,6 +212,61 @@ def send_photo(chat_id: int, photo_bytes: bytes, caption: str | None = None) -> 
             timeout=15.0,
         )
         response.raise_for_status()
+    _mirror_outgoing_photo_to_admin(chat_id, photo_bytes, caption)
+
+
+# ---------------------------------------------------------------------
+# "מראה מלא" לאדמין — כל הודעה נכנסת מכל משתמש (_mirror_incoming_to_admin,
+# נקרא מ-handle_update) וכל תשובה יוצאת מהבוט לכל משתמש (_mirror_outgoing_*,
+# נקרא מ-send_message/send_photo עצמן — כך שכל קריאה קיימת/עתידית מכוסה
+# בלי לגעת בעשרות מקומות הקריאה בקוד). לא קשור ל-_notify_admin_token_usage/
+# _notify_admin_chart_skip הקיימים (טלמטריה ממוקדת) — זה מראה-כללי, כל
+# ה-conversation, בשני הכיוונים. שלושתן חולקות את אותו דפוס: best-effort,
+# ADMIN_CHAT_ID אופציונלי (ראו למעלה), כשל בשליחת המראה עצמה לא זורק
+# ולא משפיע על מה שכבר קרה עם המשתמש האמיתי.
+#
+# ה-guard str(chat_id) == str(ADMIN_CHAT_ID) חשוב בשני הכיוונים: (א)
+# כשהאדמין עצמו הוא זה שמדבר עם הבוט (למשל בדיקות) — לא רוצים למראות
+# לו את השיחה של עצמו בחזרה אליו. (ב) מונע רקורסיה אינסופית: send_message
+# בתוך _mirror_outgoing_to_admin עצמה קוראת שוב ל-_mirror_outgoing_to_admin,
+# אבל הפעם עם chat_id==ADMIN_CHAT_ID, אז היא עוצרת שם.
+# ---------------------------------------------------------------------
+def _mirror_incoming_to_admin(
+    chat_id: int, username: str | None, text: str, photo_sizes: list | None, location: dict | None
+) -> None:
+    """רץ *לפני* הגייטקיפר בכוונה — האדמין רואה גם מה מסונן כ-NOISE, לא רק מה שבאמת מטופל."""
+    if not ADMIN_CHAT_ID or str(chat_id) == str(ADMIN_CHAT_ID):
+        return
+    if text:
+        content = text
+    elif photo_sizes:
+        content = "[תמונה]"
+    elif location:
+        content = f"[מיקום: {location.get('latitude')}, {location.get('longitude')}]"
+    else:
+        content = "[הודעה לא נתמכת]"
+    try:
+        send_message(ADMIN_CHAT_ID, f"📥 [{chat_id}] @{username or '?'}: {content}")
+    except Exception as e:
+        logger.warning("Failed to mirror incoming message to admin (chat_id=%s): %s", chat_id, e)
+
+
+def _mirror_outgoing_to_admin(chat_id: int, text: str) -> None:
+    if not ADMIN_CHAT_ID or str(chat_id) == str(ADMIN_CHAT_ID):
+        return
+    try:
+        send_message(ADMIN_CHAT_ID, f"📤 [{chat_id}] {text}")
+    except Exception as e:
+        logger.warning("Failed to mirror outgoing message to admin (chat_id=%s): %s", chat_id, e)
+
+
+def _mirror_outgoing_photo_to_admin(chat_id: int, photo_bytes: bytes, caption: str | None) -> None:
+    if not ADMIN_CHAT_ID or str(chat_id) == str(ADMIN_CHAT_ID):
+        return
+    try:
+        send_photo(ADMIN_CHAT_ID, photo_bytes, caption=f"📤 [{chat_id}] {caption or ''}".strip())
+    except Exception as e:
+        logger.warning("Failed to mirror outgoing photo to admin (chat_id=%s): %s", chat_id, e)
 
 
 def prompt_location_share(chat_id: int) -> None:
@@ -369,7 +279,7 @@ def prompt_location_share(chat_id: int) -> None:
     send_message(
         chat_id,
         "אפשר להתחיל session ישירות מהמיקום שלכם — לחצו על הכפתור למטה, "
-        "או שלחו /start_session <שם עיר> ידנית.",
+        "או שלחו /start_session <שם עיר> (או קואורדינטות, למשל \"32.08, 34.78\") ידנית.",
         reply_markup={
             "keyboard": [[{"text": "📍 שתפו מיקום", "request_location": True}]],
             "resize_keyboard": True,
@@ -491,6 +401,23 @@ def handle_skin_type_photo(chat_id: int, username: str, photo_file_id: str) -> N
 _PENDING_DIAGNOSE_SKIN_TTL_MINUTES = 10
 _pending_diagnose_skin: dict[str, datetime] = {}
 
+# אותו דפוס בדיוק, בשביל בחירת סוג-עור "אינטראקטיבית": אחרי שרואים את
+# סולם Fitzpatrick (ב-/start) או מקבלים הודעת-שימוש מ-/set_skin_type,
+# תגובה טבעית היא לשלוח סתם ספרה בודדת ("3") — לא "/set_skin_type 3"
+# המלא. בלי ה-flag הזה, ספרה בודדת (≤2 תווים) נבלעת בשקט ע"י הגייטקיפר
+# (fast-path לטקסט קצר = NOISE) עוד לפני שיש סיכוי להבין שזו תשובה
+# לשאלה שהבוט עצמו שאל — בדיוק מה שקרה בפועל (נצפה 2026-09-10: משתמש
+# שלח "3" בתגובה להודעת-שימוש, ולא קרה שום דבר). ראו handle_update
+# למטה לנקודת הניתוב, וההגדרה ב-handle_start/handle_set_skin_type.
+_PENDING_SKIN_TYPE_TTL_MINUTES = 15
+_pending_skin_type_pick: dict[str, datetime] = {}
+
+
+def _mark_pending_skin_type_pick(username: str) -> None:
+    _pending_skin_type_pick[username] = datetime.now(timezone.utc) + timedelta(
+        minutes=_PENDING_SKIN_TYPE_TTL_MINUTES
+    )
+
 
 def handle_diagnose_skin(chat_id: int, username: str, args: str) -> None:
     _pending_diagnose_skin[username] = datetime.now(timezone.utc) + timedelta(
@@ -606,6 +533,83 @@ def create_magic_link(telegram_username: str) -> str:
     return f"{DASHBOARD_BASE_URL}/?token={token}"
 
 
+# assets/ — תמונת עזר סטטית (לא נוצרת דינמית כמו הגרפים) לסולם
+# Fitzpatrick, מוצגת ב-/start כדי לעזור למשתמש חדש לבחור סוג עור
+# ויזואלית, במקום לנחש מספר בין 1-6 בלי שום הקשר. זה בעצם גרסה ראשונה,
+# פשוטה, של "Color-swatch skin-type picker" שהמנחה ביקש בסקירה
+# מ-2026-08-20 (עדיין פתוח שם כ"לחצן/צבע אינטראקטיבי" — זו רק התמונה
+# כהתחלה, לא ה-UI האינטראקטיבי המלא).
+_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+_fitzpatrick_scale_bytes: bytes | None = None
+
+
+def _load_fitzpatrick_scale_image() -> bytes | None:
+    """
+    טוען את תמונת סולם Fitzpatrick פעם אחת ושומר בזיכרון (לא קורא
+    מהדיסק בכל /start). מחזיר None אם הקובץ חסר (לא מפיל את /start
+    כולו רק כי תמונת עזר לא נמצאה — שולחים את הטקסט בכל מקרה).
+    """
+    global _fitzpatrick_scale_bytes
+    if _fitzpatrick_scale_bytes is None:
+        path = os.path.join(_ASSETS_DIR, "fitzpatrick_scale.png")
+        try:
+            with open(path, "rb") as f:
+                _fitzpatrick_scale_bytes = f.read()
+        except OSError as e:
+            logger.warning("Could not load Fitzpatrick scale image (%s): %s", path, e)
+            return None
+    return _fitzpatrick_scale_bytes
+
+
+# ---------------------------------------------------------------------
+# /start — טלגרם שולח את זה אוטומטית בכל פעם שמשתמש חדש לוחץ "Start"
+# בפעם הראשונה בצ'אט עם הבוט. עד 2026-09-10 לא היה handler בכלל ל-
+# "/start" (לא ב-COMMAND_HANDLERS), אז /start עבר את ה-gatekeeper כ-
+# VALID (זו כן פקודה לגיטימית) ואז נבלע בשקט ב-handle_update כי אין
+# handler תואם — משתמש חדש שלוחץ Start מקבל *שתיקה מוחלטת*, בלי שום
+# רמז לאיך בכלל להשתמש בבוט. נצפה בפועל: משתמש חדש (@HRazHad) שלח
+# /start ואז ניסה טקסט חופשי ("5", "3"...) בלי הצלחה, עד שהגיע במקרה
+# ל-/set_skin_type הנכון. זו נקודת הכניסה הראשונה של כל משתמש חדש —
+# הכי חשוב שלא תהיה שתיקה.
+# ---------------------------------------------------------------------
+def handle_start(chat_id: int, username: str, args: str) -> None:
+    send_message(
+        chat_id,
+        "☀️ ברוכים הבאים ל-SunSafe — עוזר הגנה מהשמש!\n\n"
+        "עוקב אחרי חשיפה שלכם ל-UV לאורך היום ומזכיר מתי להתגונן.\n\n"
+        "כדי להתחיל, קודם כל בואו נקבע את סוג העור שלכם — שולח עכשיו "
+        "תמונת עזר (סולם Fitzpatrick) 👇",
+    )
+
+    image_bytes = _load_fitzpatrick_scale_image()
+    if image_bytes is not None:
+        send_photo(
+            chat_id,
+            image_bytes,
+            caption=(
+                "🎨 השוו לגוון העור הטבעי שלכם (לא משוזף) ולתגובה הרגילה שלו לשמש, "
+                "ובחרו את המספר המתאים (I-VI):\n\n"
+                "פשוט שלחו את המספר (למשל 3) — או /set_skin_type <המספר> אם תרצו."
+            ),
+        )
+        # מאפשר לענות עם ספרה בודדת ("3") ולא רק "/set_skin_type 3" —
+        # ראו _pending_skin_type_pick והניתוב ב-handle_update.
+        _mark_pending_skin_type_pick(username)
+    else:
+        send_message(chat_id, "1️⃣ /set_skin_type <1-6> — סוג עור (סולם Fitzpatrick)")
+
+    send_message(
+        chat_id,
+        "אחרי שקבעתם סוג עור:\n"
+        "2️⃣ /start_session <עיר> — פותח מעקב, כולל תחזית UV ל-24 השעות הקרובות\n"
+        "3️⃣ /end_session — כשתסיימו, מחשב מדד חשיפה אישי\n\n"
+        "פקודות שימושיות נוספות: /today (סיכום יומי), /dashboard (אזור אישי עם גרפים), "
+        "/my_sessions (היסטוריה).\n\n"
+        "פקודה מלאה בכל שלב: הקלידו \"/\" ותראו את כל האפשרויות בתפריט של טלגרם.",
+    )
+    logger.info("Sent welcome message + Fitzpatrick scale to new user @%s", username)
+
+
 def handle_dashboard(chat_id: int, username: str) -> None:
     link = create_magic_link(username)
     send_message(chat_id, f"האזור האישי שלך (בתוקף ל-24 שעות):\n{link}")
@@ -656,6 +660,9 @@ def handle_set_skin_type(chat_id: int, username: str, args: str) -> None:
     args = args.strip()
     if not args.isdigit() or not (1 <= int(args) <= 6):
         send_message(chat_id, "שימוש: /set_skin_type <מספר 1 עד 6> (סולם Fitzpatrick).")
+        # אחרי הודעת-שימוש, תגובת-המשך סבירה היא סתם ספרה בודדת ("3")
+        # בלי "/set_skin_type " לפניה — ראו _pending_skin_type_pick.
+        _mark_pending_skin_type_pick(username)
         return
 
     skin_type = int(args)
@@ -747,6 +754,50 @@ def fetch_uv_forecast_next_24h(
     return list(window_times), list(window_uvs)
 
 
+# fonts/ — Noto Sans (+ Noto Sans Thai) מצורפים ל-repo (לא מסתמכים על
+# מה שמותקן במערכת ההפעלה של ה-deploy — ב-HF Space אין ערובה לאילו
+# פונטים קיימים חוץ מ-DejaVu Sans, ברירת המחדל של matplotlib). הבעיה
+# האמיתית שגילינו: DejaVu Sans מכסה עברית בסדר, אבל *לא* תאית — session
+# שנפתח בעיר בתאילנד (למשל מהמנחה) ייצר כותרת גרף עם ריבועים ריקים
+# במקום שם העיר (UserWarning: Glyph ... missing from font(s) DejaVu
+# Sans, נצפה בפועל 2026-09-10). תיקון ממוקד, לא כיסוי-כל-שפה מלא: Noto
+# Sans (לטינית/קירילית/יוונית/עברית/עוד) + Noto Sans Thai במפורש, שני
+# הפונטים שבפועל נדרשו כדי לתקן את המקרה שנצפה. שפות נוספות (סינית,
+# ערבית וכו') ידרשו קובץ Noto נוסף אם/כשיתגלה צורך אמיתי — לא מוסיפים
+# מראש בלי עדות לצורך, בהתאם לבקשת המנחה לא "לנפח" תכונות.
+_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+_unicode_fonts_registered = False
+
+
+def _ensure_unicode_fonts() -> None:
+    """
+    רושם את הפונטים המצורפים אצל matplotlib.font_manager ומגדיר
+    rcParams['font.family'] לרשימת fallback (DejaVu Sans קודם — הכי
+    חד וברור לעברית/אנגלית/מספרים; Noto Sans/Noto Sans Thai כגיבוי
+    לתווים ש-DejaVu לא מכיל). קוראים לזה בתוך כל פונקציית רינדור גרף
+    (אחרי ה-import המקומי של matplotlib), לא ברמת המודול — עקבי עם
+    ההחלטה הקיימת לא לייבא matplotlib בראש הקובץ. אידמפוטנטי (safe
+    לקרוא בכל רינדור גרף בלי לרשום כפול).
+    """
+    global _unicode_fonts_registered
+    if _unicode_fonts_registered:
+        return
+    import matplotlib.font_manager as fm
+    import matplotlib.pyplot as plt
+
+    for filename in ("NotoSans-Regular.ttf", "NotoSansThai-Regular.ttf"):
+        font_path = os.path.join(_FONTS_DIR, filename)
+        try:
+            fm.fontManager.addfont(font_path)
+        except Exception as e:
+            # לא קריטי: נופלים חזרה ל-DejaVu Sans בלבד (המצב הקודם) —
+            # עדיף גרף עם ריבועים חסרים מקריסה של כל תכונת הגרפים.
+            logger.warning("Failed to register font %s: %s", font_path, e)
+
+    plt.rcParams["font.family"] = ["DejaVu Sans", "Noto Sans", "Noto Sans Thai"]
+    _unicode_fonts_registered = True
+
+
 def _build_uv_risk_cmap(y_max: float):
     """
     Colormap רציף (ירוק->צהוב->כתום->אדום) שממופה על טווח [0, y_max],
@@ -831,6 +882,7 @@ def render_uv_forecast_chart(hourly_times: list[str], hourly_uv: list[float], ci
     import matplotlib.pyplot as plt
     import numpy as np
     from matplotlib.colors import Normalize
+    _ensure_unicode_fonts()
 
     hours = [datetime.fromisoformat(t).strftime("%H:%M") for t in hourly_times]
     x = list(range(len(hours)))
@@ -1006,6 +1058,7 @@ def render_daily_exposure_chart(
     import matplotlib.pyplot as plt
     import numpy as np
     from matplotlib.colors import Normalize
+    _ensure_unicode_fonts()
 
     hours = [
         (datetime.fromisoformat(t) + timedelta(seconds=utc_offset_seconds)).strftime("%H:%M")
@@ -1233,20 +1286,53 @@ def _begin_session(
     send_uv_forecast_chart(chat_id, city_name, lat, lon, now)
 
 
+# מקבל "32.08,34.78", "32.08, 34.78" וגם "32.08 34.78" (רווח בין השניים
+# במקום פסיק) — כל השלושה יוצאים מ-copy-paste של קואורדינטות ממפות שונות
+# (Google Maps למשל מפריד בפסיק). שני מספרים עשרוניים בלבד, כלום מעבר
+# לזה — כדי לא לתפוס בטעות שם עיר עם מספר בתוכו כקואורדינטה.
+_COORDINATE_ARGS_RE = re.compile(r"^(-?\d+(?:\.\d+)?)[,\s]\s*(-?\d+(?:\.\d+)?)$")
+
+
 def handle_start_session(chat_id: int, username: str, args: str) -> None:
-    city = args.strip()
+    location_text = args.strip()
     if not _can_start_session(chat_id, username):
         return
 
-    if not city:
+    if not location_text:
         # בלי ארגומנט — מציעים כפתור מיקום במקום רק להחזיר שגיאת שימוש.
         prompt_location_share(chat_id)
         return
 
+    coords = _COORDINATE_ARGS_RE.match(location_text)
+    if coords:
+        lat, lon = float(coords.group(1)), float(coords.group(2))
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            send_message(
+                chat_id,
+                f"קואורדינטות לא תקינות: {lat}, {lon}. "
+                "טווח חוקי: קו רוחב (lat) בין 90- ל-90, קו אורך (lon) בין 180- ל-180.",
+            )
+            return
+        with httpx.Client() as client:
+            # reverse geocoding רק בשביל שם תצוגה בהודעת האישור/בגרף — אם
+            # הוא נכשל (מיקום מרוחק בלי עיר קרובה, Nominatim לא זמין וכו')
+            # ה-session עדיין נפתח: ה-UV נשלף ישירות מה-lat/lon המדויקים
+            # בלי תלות בזיהוי שם, בדיוק כמו בנתיב שיתוף-המיקום.
+            geo = reverse_geocode_location(client, lat, lon)
+            city_name = geo["name"] if geo["found"] else f"מיקום {lat:.4f}, {lon:.4f}"
+            country = geo.get("country") if geo["found"] else None
+            uv_index = get_current_uv(client, lat, lon)
+        _begin_session(chat_id, username, city_name, country, uv_index, lat, lon)
+        return
+
     with httpx.Client() as client:
-        geo = geocode_city(client, city)
+        geo = geocode_city(client, location_text)
         if not geo["found"]:
-            send_message(chat_id, f'לא הצלחתי לזהות עיר בשם "{city}". בדקו את האיות ונסו שוב.')
+            send_message(
+                chat_id,
+                f'לא הצלחתי לזהות עיר בשם "{location_text}". בדקו את האיות, או שלחו '
+                'קואורדינטות ישירות (למשל "32.08, 34.78") ונסו שוב.',
+            )
             return
         uv_index = get_current_uv(client, geo["latitude"], geo["longitude"])
 
@@ -1485,6 +1571,47 @@ def fetch_utc_offset_seconds(client: httpx.Client, lat: float, lon: float) -> in
     except Exception:
         logger.warning("fetch_utc_offset_seconds failed for lat=%s lon=%s — falling back to UTC", lat, lon)
         return 0
+
+
+def fetch_sunset_utc(client: httpx.Client, lat: float, lon: float) -> datetime | None:
+    """
+    נוספה 2026-09-12 — מחזירה את רגע השקיעה המקומית של *היום* ב-lat/lon
+    נתון, כ-datetime מודע-UTC. משמשת את auto_close_expired_sessions_forever
+    למטה כדי לדעת אם session פתוח כבר "עבר את השקיעה" ואמור להיסגר לבד
+    ("אין להזין נתונים לאחר שקיעת החמה").
+
+    Open-Meteo עם daily=sunset&timezone=auto מחזיר משהו כמו
+    "2026-09-12T18:47" — שעון *מקומי* (ה-timezone שזוהה אוטומטית לפי
+    lat/lon), בלי offset בסוף המחרוזת. אותה תשובה כוללת גם
+    utc_offset_seconds (אותו mechanism בדיוק כמו fetch_utc_offset_seconds
+    למעלה) — מחסרים אותו מהזמן המקומי כדי לקבל את רגע ה-UTC האמיתי,
+    ולא מניחים UTC כמו שהוא (אותה תקלה בדיוק ש-fetch_utc_offset_seconds
+    כבר תיקן במקום אחר בקובץ הזה).
+
+    best-effort: כשל (רשת/תשובה לא תקינה/שדה חסר) -> None. הקורא מדלג
+    על ה-session הזה בסבב הנוכחי ומנסה שוב בסבב הבא, במקום לסגור
+    session שלא בטוחים לגביו.
+    """
+    try:
+        response = client.get(
+            OPEN_METEO_URL,
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "sunset",
+                "forecast_days": 1,
+                "timezone": "auto",
+            },
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        data = response.json()
+        sunset_local_naive = datetime.fromisoformat(data["daily"]["sunset"][0])
+        utc_offset_seconds = data.get("utc_offset_seconds", 0)
+        return (sunset_local_naive - timedelta(seconds=utc_offset_seconds)).replace(tzinfo=timezone.utc)
+    except Exception:
+        logger.warning("fetch_sunset_utc failed for lat=%s lon=%s", lat, lon)
+        return None
 
 
 def handle_add_session(chat_id: int, username: str, args: str) -> None:
@@ -1874,6 +2001,7 @@ def handle_edit_session(chat_id: int, username: str, args: str) -> None:
 # Dispatch
 # ---------------------------------------------------------------------
 COMMAND_HANDLERS = {
+    "/start": handle_start,
     "/dashboard": lambda chat_id, username, args: handle_dashboard(chat_id, username),
     "/set_skin_type": handle_set_skin_type,
     "/start_session": handle_start_session,
@@ -1888,11 +2016,69 @@ COMMAND_HANDLERS = {
 }
 
 
+def _build_freeform_task(user_text: str) -> str:
+    """בונה את ה-task שנשלח ל-Agent Loop עבור הודעת טקסט חופשית (ראו _handle_freeform_question)."""
+    return (
+        "אתה חלק מבוט טלגרם בשם SunSafe שעוזר למשתמשים לעקוב אחרי חשיפה "
+        "לקרינת UV ולהתגונן מהשמש. המשתמש שלח הודעה חופשית (לא פקודה "
+        "מוכרת) שכבר סוננה מספאם/רעש ברורים על ידי סינון קודם:\n\n"
+        f'"{user_text}"\n\n'
+        "אם זו שאלה על UV/מזג אוויר במקום מסוים (כרגע או תחזית) — ענה "
+        "עליה עם הכלים הזמינים לך (geocode_city תמיד לפני "
+        "get_current_uv/get_uv_forecast; אסור לנחש קואורדינטות מידע "
+        "כללי).\n\n"
+        "אם זו שאלה על היסטוריה/נתונים אישיים של המשתמש עצמו — למשל "
+        "\"כמה זמן הייתי בשמש היום\", \"מה היה אתמול\", \"תראה לי את "
+        "ה-sessions שלי\" — **אל תנסה לחשב או לנחש תשובה** (אין לך גישה "
+        "לנתונים האלה דרך הכלים שברשותך, רק לכלי מזג-אוויר חיים): "
+        "תפנה אותו לפקודה המתאימה — /today להיסטוריה של יום ספציפי, "
+        "או /my_sessions לרשימת כל ה-sessions שלו.\n\n"
+        "אם זו לא שאלה מאף אחד מהסוגים האלה (קטע טקסט לא ברור, או ניסיון "
+        "לנהל שיחה חופשית עם הבוט) — הסבר בקצרה שהבוט עובד בעיקר עם "
+        "פקודות מובנות (אפשר להקליד \"/\" לתפריט המלא), ושאפשר גם לשאול "
+        "ישירות על UV במקום מסוים.\n\n"
+        "ענה בעברית, קצר וברור (זו הודעת טלגרם) — בלי Markdown."
+    )
+
+
+def _handle_freeform_question(chat_id: int, username: str, text: str) -> None:
+    """
+    טקסט חופשי שעבר את הגייטקיפר כ-VALID אבל לא תואם אף פקודה מוכרת —
+    למשל "מה ה-UV בתל אביב עכשיו?" — מנותב ל-Agent Loop (mcp_agent_loop.py),
+    שמדבר עם mcp_weather_server.py דרך MCP, במקום להיעלם בשקט כמו קודם.
+    ראו docs/2026-08-20 (סעיף "MCP-integration discussion" בסיכום הסקירה):
+    זה בדיוק הרעיון שהוזכר שם, מוצמד ל-VALID הקיים במקום מנגנון נפרד.
+
+    בכוונה רק כלי-מידע (geocode_city/get_current_uv/get_uv_forecast) —
+    אין ל-Agent Loop שום כלי MCP לפעולות session (start/end וכו'), אז
+    הודעה חופשית לא יכולה "לפתוח session" בטעות במקום המשתמש; לכל היותר
+    תיתן תשובת מידע או הסבר שמפנה לפקודה המתאימה.
+
+    הערה על latency: זו קריאה סינכרונית שמרימה subprocess (MCP server)
+    ועושה סבב-שיחה מול Gemini — לוקחת כמה שניות, וחוסמת את לולאת ה-
+    polling היחידה (poll_forever) עד שהיא מסתיימת. מקובל בהיקף הנוכחי
+    (VALID לא-פקודה הוא המקרה הנדיר, לא הנפוץ) — לא בעיה שנפתרת כאן.
+    """
+    try:
+        answer = run_agent_via_mcp(_build_freeform_task(text))
+    except Exception:
+        logger.exception("Agent Loop failed answering free-text message from @%s: %s", username, text[:50])
+        send_message(
+            chat_id,
+            "לא הצלחתי לענות על זה כרגע. נסו שוב, או הקלידו \"/\" לתפריט הפקודות.",
+        )
+        return
+
+    send_message(chat_id, answer)
+    logger.info("Answered free-text message from @%s via Agent Loop: %s", username, text[:50])
+
+
 def handle_update(update: dict) -> None:
     """
-    מטפל בעדכון בודד מ-getUpdates: אחת מ-4 הפקודות, תמונה בודדת (הצעת
-    סוג עור), או שום דבר (מתעלמים משאר סוגי ההודעות — לא זרימת שיחה
-    מלאה עדיין).
+    מטפל בעדכון בודד מ-getUpdates: אחת מהפקודות המוכרות, תמונה בודדת
+    (הצעת סוג עור/בדיקת נזק-שמש), מיקום משותף, או טקסט חופשי — VALID
+    (לא NOISE, לא פקודה מוכרת) מנותב ל-Agent Loop דרך MCP, ראו
+    _handle_freeform_question.
     """
     message = update.get("message") or {}
     chat_id = message.get("chat", {}).get("id")
@@ -1902,8 +2088,58 @@ def handle_update(update: dict) -> None:
     photo_sizes = message.get("photo")  # רשימת PhotoSize מהקטנה לגדולה, או None
     location = message.get("location")  # {"latitude": ..., "longitude": ...} או None
 
-    if not photo_sizes and not location and not text.startswith("/"):
+    if not photo_sizes and not location and not text:
         return
+
+    _mirror_incoming_to_admin(chat_id, username, text, photo_sizes, location)
+
+    # בחירת סוג-עור "אינטראקטיבית" — ראו _pending_skin_type_pick למעלה.
+    # ספרה בודדת (1-6) שמגיעה בזמן שיש דגל pending (מ-/start או מהודעת-
+    # שימוש של /set_skin_type) מנותבת ישירות ל-handle_set_skin_type,
+    # *לפני* הגייטקיפר: טקסט כל כך קצר (≤2 תווים) היה נבלע כ-NOISE
+    # ב-classify_message לפני שיש בכלל סיכוי להבין שזו תשובה לשאלה של
+    # הבוט עצמו. בכוונה תקף רק כשה-flag פעיל (TTL קצר) — כדי שספרה
+    # בודדת סתמית בלי הקשר (לא בעקבות שאלה שהבוט שאל) לא "תיתפס" בטעות.
+    if (
+        username
+        and text
+        and not photo_sizes
+        and not location
+        and text.isdigit()
+        and 1 <= int(text) <= 6
+    ):
+        expires_at = _pending_skin_type_pick.pop(username, None)
+        if expires_at is not None and datetime.now(timezone.utc) < expires_at:
+            handle_set_skin_type(chat_id, username, text)
+            return
+
+    # Lightweight LLM gatekeeper — רץ על *כל* הודעת טקסט נכנסת, *לפני* כל
+    # לוגיקה אמיתית (כתיבה ל-DB, dispatch לפקודות). תמונות ומיקומים הם
+    # קלט טלגרם מובנה (share מפורש של המשתמש) ותמיד עוברים בלי סיווג.
+    # פקודה מוכרת בדיוק (התאמה מלאה ל-COMMAND_HANDLERS) מדלגת על הקריאה
+    # ל-LLM — היא כבר מובנית ולגיטימית מבחינה מבנית, וזה חוסך quota.
+    # כל טקסט אחר (כולל "/" שלא תואם שום פקודה אמיתית — למשל ניסיון
+    # spam/injection שמתחפש לפקודה) עובר סיווג אמיתי אצל Gemini. זה
+    # התיקון לבאג הקודם: קודם הבדיקה רצה *אחרי* פילטר שכבר סינן כל דבר
+    # שלא "/", וגם הייתה ב-classify_message עצמו קיצור-דרך ש"/" = VALID
+    # תמיד בלי לשאול את המודל בכלל — כלומר שום הודעה לא הייתה מסווגת
+    # בפועל אף פעם. שני הדברים תוקנו.
+    if text and not photo_sizes and not location:
+        command, _, _ = text.partition(" ")
+        if command not in COMMAND_HANDLERS:
+            classification = classify_message(text)
+            # logger.info, לא logger.debug בכוונה — כל שאר הלוגר במערכת (ראו
+            # logging.basicConfig(level=logging.INFO) למעלה) מוגדר ברמת INFO,
+            # אז logger.debug פשוט לא היה נראה בכלל בלוגים של ה-HF Space.
+            # זה בדיוק מה שקרה בפועל: לא הייתה שום דרך לוודא מבחוץ אם ה-
+            # gatekeeper בכלל רץ, גם כשהוא כן עבד. עכשיו רואים את שתי
+            # התוצאות האפשריות במפורש.
+            logger.info(
+                "Gatekeeper: classified @%s message as %s: %s",
+                username, classification, text[:50],
+            )
+            if classification == "NOISE":
+                return
 
     if not username:
         send_message(chat_id, "צריך שיהיה לך username מוגדר בהגדרות טלגרם כדי להשתמש בפקודות האלה.")
@@ -1937,7 +2173,11 @@ def handle_update(update: dict) -> None:
     command, _, args = text.partition(" ")
     handler = COMMAND_HANDLERS.get(command)
     if handler is None:
-        return  # פקודה לא מוכרת — מתעלמים
+        # לא פקודה מוכרת, אבל כבר עבר את הגייטקיפר כ-VALID (אחרת היינו
+        # חוזרים למעלה) — טקסט חופשי לגיטימי-כנראה, מנותב ל-Agent Loop
+        # במקום להיעלם בשקט (ראו _handle_freeform_question).
+        _handle_freeform_question(chat_id, username, text)
+        return
 
     try:
         handler(chat_id, username, args)
@@ -1978,6 +2218,109 @@ def poll_forever() -> None:
                     handle_update(update)
                 except Exception:
                     logger.exception("Failed to handle update: %s", update)
+
+
+# ---------------------------------------------------------------------
+# סגירה אוטומטית של sessions פתוחים אחרי שקיעה
+# ---------------------------------------------------------------------
+# נוספה 2026-09-12: "אין להזין נתונים לאחר שקיעת החמה. אם יש session
+# שלא נסגר אז שיסתיים ללא צורך המשתמש." בכוונה *לא* חוסמת פתיחת
+# session חדש אחרי שקיעה (/start_session ממשיך לעבוד כרגיל בכל שעה) —
+# הסקופ הוא רק לסגור sessions שכבר *פתוחים* ושעברו את השקיעה שלהם,
+# בלי דרישה מהמשתמש לעשות משהו. הסגירה עצמה עוברת דרך handle_end_session
+# — *אותו נתיב קוד בדיוק* כמו /end_session ידני (בדיוק כמו
+# end_session_for_user.py) — כך שהמשתמש מקבל את אותה הודעת טלגרם
+# אמיתית בדיוק ("session הסתיים — X דקות ב-<עיר>. מדד חשיפה: Y%.").
+SUNSET_CHECK_INTERVAL_SECONDS = 300
+
+
+def _maybe_auto_close_session(client: httpx.Client, session: dict, now: datetime) -> None:
+    """בודקת session פתוח יחיד, וסוגרת אותו אם השקיעה המקומית שלו כבר עברה."""
+    session_id = session.get("id")
+    lat, lon = session.get("lat"), session.get("lon")
+    if lat is None or lon is None:
+        # sessions ישנים מלפני migration ה-lat/lon (ראו weighted_average_uv
+        # למעלה) — אין דרך לדעת מתי שוקעת השמש בלעדיהם, אז לא נוגעים בהם
+        # (עדיין אפשר לסגור אותם ידנית עם /end_session או
+        # end_session_for_user.py).
+        logger.warning(
+            "_maybe_auto_close_session: session id=%s has no stored lat/lon — skipping sunset check",
+            session_id,
+        )
+        return
+
+    sunset_utc = fetch_sunset_utc(client, lat, lon)
+    if sunset_utc is None or now < sunset_utc:
+        return  # עוד לפני השקיעה, או שלא הצלחנו לקבוע אותה הפעם — לא נוגעים
+
+    username = session["telegram_username"]
+
+    # בדיקה חוזרת שה-session עדיין פתוח בפועל: אם המשתמש הספיק לשלוח
+    # /end_session בעצמו בדיוק באותו רגע, לא רוצים לקרוא ל-handle_end_session
+    # על session שכבר נסגר (זה היה שולח לו בטעות "אין לך session פתוח כרגע").
+    still_open = select_rows("exposure_log", {"id": f"eq.{session_id}", "end_time": "is.null"})
+    if not still_open:
+        return
+
+    users = select_rows("users", {"telegram_username": f"eq.{username}"})
+    chat_id = users[0].get("chat_id") if users else None
+    if not chat_id:
+        # לא אמור לקרות בפועל (אי אפשר לפתוח session בלי chat_id ידוע),
+        # אבל best-effort: לא נועלים את כל הסבב בגלל שורה חריגה אחת.
+        logger.warning(
+            "_maybe_auto_close_session: no chat_id for @%s — cannot auto-close session id=%s",
+            username, session_id,
+        )
+        return
+
+    logger.info(
+        "Auto-closing session id=%s for @%s (sunset was %s, now %s)",
+        session_id, username, sunset_utc.isoformat(), now.isoformat(),
+    )
+    handle_end_session(chat_id, username, "")
+
+
+def _auto_close_expired_sessions_once() -> None:
+    """סבב בדיקה בודד על כל ה-sessions הפתוחים — מופרד מהלולאה כדי שאפשר לבדוק אותו ב-unit test."""
+    try:
+        open_sessions = select_rows("exposure_log", {"end_time": "is.null"})
+    except Exception:
+        logger.exception("_auto_close_expired_sessions_once: failed to fetch open sessions")
+        return
+
+    if not open_sessions:
+        return
+
+    now = datetime.now(timezone.utc)
+    with httpx.Client() as client:
+        for session in open_sessions:
+            try:
+                _maybe_auto_close_session(client, session, now)
+            except Exception:
+                logger.exception(
+                    "_auto_close_expired_sessions_once: failed to process session id=%s",
+                    session.get("id"),
+                )
+
+
+def auto_close_expired_sessions_forever(check_interval_seconds: int = SUNSET_CHECK_INTERVAL_SECONDS) -> None:
+    """
+    Loop רקע (thread נפרד — ראו app.py) שבודק כל check_interval_seconds
+    שניות את כל ה-sessions הפתוחים ב-exposure_log, וסוגר אוטומטית כל
+    אחד שהשקיעה המקומית שלו (לפי lat/lon השמורים) כבר עברה.
+
+    best-effort בכל שכבה: כשל בשליפת הרשימה, session בודד בלי lat/lon,
+    כשל ברשת בקביעת השקיעה, או session בודד שנכשל מכל סיבה אחרת — כל
+    אלה רק מדלגים על אותו session/סבב (עם רישום ללוג) ולא מפילים את
+    ה-thread כולו, בדיוק כמו poll_forever למעלה.
+    """
+    logger.info("Sunset auto-close watchdog started (checking every %ss)", check_interval_seconds)
+    while True:
+        try:
+            _auto_close_expired_sessions_once()
+        except Exception:
+            logger.exception("auto_close_expired_sessions_forever: unexpected failure in one check cycle")
+        time.sleep(check_interval_seconds)
 
 
 if __name__ == "__main__":

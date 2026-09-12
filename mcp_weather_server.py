@@ -19,18 +19,23 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from supabase_client import insert_row
+from geo_uv_core import (
+    calculate_exposure_score as core_calculate_exposure_score,
+    score_to_level,
+    geocode_city as core_geocode_city,
+    fetch_current_weather,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sunsafe.mcp_weather_server")
 
 mcp = FastMCP("weather-mcp-server")
 
+# geocoding/UV/exposure-score עברו ל-geo_uv_core.py (2026-09-09, ניקוי
+# כפילות מול bot_commands.py — ראו שם). OPEN_METEO_URL נשאר כאן כי
+# get_uv_forecast (למטה) עדיין משתמש בו ישירות ולא הועבר (לא כפול
+# באף מקום אחר).
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
-GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
-
-# זהה לנוסחה ב-README/דף ההדגמה/bot_commands.py — כל שינוי כאן צריך
-# להיות מסונכרן בשלושת המקומות.
-SKIN_TYPE_FACTOR = {1: 0.5, 2: 0.75, 3: 1.0, 4: 1.5, 5: 2.5, 6: 4.0}
 
 
 @mcp.tool()
@@ -48,53 +53,39 @@ async def geocode_city(city_name: str) -> dict:
     "longitude".
     אם found=False: לא נמצאה עיר מתאימה לשם שסופק — אין לנחש ערכים,
     יש לדווח על כך למשתמש.
+
+    מ-2026-09-09: מיושם דרך geo_uv_core.geocode_city המשותף עם הבוט
+    החי (bot_commands.py) — כולל את שכבת פיצול-עיר/מדינה ואת הגיבוי
+    ל-Nominatim, לא רק ההתאמה הישירה כמו קודם. אותו client סינכרוני
+    (httpx.Client, לא AsyncClient) בכוונה — שרת MCP מקומי, יוזר יחיד,
+    בלי לחץ concurrency אמיתי שמצדיק async כאן.
     """
     logger.info("geocode_city(city_name=%s)", city_name)
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            GEOCODING_URL,
-            params={"name": city_name, "count": 1, "language": "he", "format": "json"},
-            timeout=10.0,
-        )
-        response.raise_for_status()
-        results = response.json().get("results") or []
+    with httpx.Client() as client:
+        result = core_geocode_city(client, city_name)
 
-        if not results:
-            logger.info("geocode_city(%s) -> not found", city_name)
-            return {"found": False, "query": city_name}
+    if not result["found"]:
+        logger.info("geocode_city(%s) -> not found", city_name)
+        return {"found": False, "query": city_name}
 
-        top = results[0]
-        result = {
-            "found": True,
-            "name": top.get("name"),
-            "country": top.get("country"),
-            "latitude": top.get("latitude"),
-            "longitude": top.get("longitude"),
-        }
-        logger.info("geocode_city(%s) -> %s", city_name, result)
-        return result
+    logger.info("geocode_city(%s) -> %s", city_name, result)
+    return result
 
 
 @mcp.tool()
 async def get_current_uv(lat: float, lon: float) -> dict:
     """
-    Return the current UV index, temperature and cloud cover for a given
-    geographic location. Call this tool whenever up-to-date information about
-    the UV radiation level at a specific place is needed.
+    Return the current UV index, temperature, cloud cover and relative
+    humidity for a given geographic location. Call this tool whenever
+    up-to-date information about the UV radiation level or weather at a
+    specific place is needed — including humidity questions.
+
+    מ-2026-09-09: מיושם דרך geo_uv_core.fetch_current_weather המשותף.
+    מ-2026-09-12: נוספה לחות יחסית (relative_humidity_2m).
     """
     logger.info("get_current_uv(lat=%s, lon=%s)", lat, lon)
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            OPEN_METEO_URL,
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "current": "uv_index,temperature_2m,cloud_cover",
-            },
-            timeout=10.0,
-        )
-        response.raise_for_status()
-        return response.json()["current"]
+    with httpx.Client() as client:
+        return fetch_current_weather(client, lat, lon)
 
 
 @mcp.tool()
@@ -116,26 +107,13 @@ def calculate_exposure_score(
     exposure_score = round((duration_minutes / safe_minutes) × 100).
 
     מחזיר {"exposure_score": int, "level": "good"|"warning"|"serious"|"critical"}.
-    """
-    # UV=0 תקין לגמרי (למשל session שנפתח בלילה) — לא שגיאה, אבל
-    # 200/uv_index עם 0 קורס ב-ZeroDivisionError. בלי חשיפה ל-UV הסיכון
-    # הוא אפס, ללא תלות במשך הזמן.
-    if uv_index <= 0:
-        score = 0
-    else:
-        factor = SKIN_TYPE_FACTOR.get(skin_type, 1.0)
-        effective_spf = 1.0 if not spf else 1 + (spf - 1) * 0.4
-        safe_minutes = (200 / uv_index) * factor * effective_spf
-        score = round((duration_minutes / safe_minutes) * 100)
 
-    if score < 40:
-        level = "good"
-    elif score < 70:
-        level = "warning"
-    elif score < 100:
-        level = "serious"
-    else:
-        level = "critical"
+    מ-2026-09-09: מיושם דרך geo_uv_core.calculate_exposure_score/
+    score_to_level המשותפים עם הבוט החי (bot_commands.py) — אותה נוסחה
+    בדיוק, רק ממוקמת פעם אחת במקום פעמיים.
+    """
+    score = core_calculate_exposure_score(uv_index, duration_minutes, skin_type, spf)
+    level = score_to_level(score)
 
     logger.info(
         "calculate_exposure_score(uv=%s, duration=%s, skin_type=%s, spf=%s) -> %s (%s)",

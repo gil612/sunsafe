@@ -24,12 +24,15 @@ import threading
 
 import gradio as gr
 
-from bot_commands import poll_forever
+from bot_commands import auto_close_expired_sessions_forever, poll_forever
 
 logger = logging.getLogger("sunsafe.hf_space")
 
 _bot_thread_started = False
 _start_lock = threading.Lock()
+
+_sunset_watchdog_started = False
+_sunset_watchdog_lock = threading.Lock()
 
 
 def _start_bot_once() -> None:
@@ -49,7 +52,28 @@ def _start_bot_once() -> None:
         logger.info("SunSafe bot polling thread started")
 
 
+def _start_sunset_watchdog_once() -> None:
+    """
+    מפעיל את auto_close_expired_sessions_forever() ב-thread נפרד משלו,
+    פעם אחת בלבד לכל תהליך — אותו lock+flag pattern בדיוק כמו
+    _start_bot_once() למעלה. thread נפרד (לא אותו thread כמו הבוט)
+    כי poll_forever חוסם על getUpdates במשך עד 30 שניות בכל סבב, וזה
+    לא אמור לעכב את בדיקת השקיעה (וגם לא להפך).
+    """
+    global _sunset_watchdog_started
+    with _sunset_watchdog_lock:
+        if _sunset_watchdog_started:
+            return
+        _sunset_watchdog_started = True
+        thread = threading.Thread(
+            target=auto_close_expired_sessions_forever, name="sunsafe-sunset-watchdog", daemon=True
+        )
+        thread.start()
+        logger.info("SunSafe sunset auto-close watchdog thread started")
+
+
 _start_bot_once()
+_start_sunset_watchdog_once()
 
 with gr.Blocks(title="SunSafe Bot Status") as demo:
     gr.Markdown(

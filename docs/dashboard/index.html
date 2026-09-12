@@ -227,6 +227,32 @@
     border: 4px solid transparent; border-top-color: var(--text-primary);
   }
 
+  /* ---------- Monthly analysis (cumulative exposure trend) ---------- */
+  .month-chart-wrap { position: relative; margin-top: 4px; }
+  .month-chart-wrap svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .month-gridline { stroke: var(--gridline); stroke-width: 1; }
+  .month-area { fill: var(--series-blue); opacity: 0.10; }
+  .month-line { fill: none; stroke: var(--series-blue); stroke-width: 2; }
+  .month-dot {
+    fill: var(--surface-1); stroke: var(--series-blue); stroke-width: 2;
+    cursor: pointer; transition: r .1s ease;
+  }
+  .month-dot:hover { fill: var(--series-blue); }
+  .month-axis-label { font-size: 10px; fill: var(--text-muted); font-family: inherit; }
+  .month-tooltip {
+    position: absolute; transform: translate(-50%, -100%) translateY(-8px);
+    background: var(--text-primary); color: var(--surface-1);
+    font-size: 11.5px; padding: 6px 9px; border-radius: 6px;
+    white-space: nowrap; opacity: 0; pointer-events: none;
+    transition: opacity .12s; z-index: 3;
+  }
+  .month-tooltip.visible { opacity: 1; }
+  .month-tooltip::after {
+    content: ""; position: absolute; top: 100%; left: 50%;
+    transform: translateX(-50%);
+    border: 4px solid transparent; border-top-color: var(--text-primary);
+  }
+
   .feedback-box {
     margin-top: 18px; padding: 14px 16px; border-radius: 10px;
     background: var(--page); border: 1px solid var(--border);
@@ -283,6 +309,25 @@
     <div class="feedback-box">
       <div class="fb-title">💡 המלצה</div>
       <div id="feedback-text">—</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>ניתוח חודשי — <span id="month-label">—</span></h2>
+    <p class="card-sub">מגמת חשיפה מצטברת לאורך החודש (סכום מדדי החשיפה היומיים, יום אחר יום)</p>
+
+    <div class="date-pills" id="month-pills"></div>
+
+    <div class="stat-grid" id="month-stat-grid"></div>
+
+    <div class="month-chart-wrap">
+      <svg id="month-chart-svg" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
+      <div class="month-tooltip" id="month-tooltip"></div>
+    </div>
+
+    <div class="feedback-box">
+      <div class="fb-title">💡 סיכום החודש</div>
+      <div id="month-feedback-text">—</div>
     </div>
   </div>
 
@@ -351,6 +396,12 @@
 
   let currentUser = null;
   let currentDate = null;
+  let currentMonth = null;
+
+  const HEBREW_MONTHS = [
+    "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני",
+    "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר",
+  ];
 
   // ---------------------------------------------------------------
   // Domain logic — אותה נוסחה שהוגדרה ב-SPEC של הפרויקט
@@ -453,7 +504,7 @@
       showStatus(
         "👋",
         "עוד לא הגדרת סוג עור",
-        "שלחו /set_skin_type לבוט כדי להתחיל, ואז רעננו את הדף הזה."
+        "שלחו /start לבוט כדי להתחיל (זה גם יעזור לכם להגדיר סוג עור), ואז רעננו את הדף הזה."
       );
       return;
     }
@@ -570,6 +621,11 @@
     renderDatePills(dates);
     renderSessionsTable();
     renderAnalysis();
+
+    const months = [...new Set(dates.map(d => d.slice(0, 7)))].sort().reverse();
+    currentMonth = months[0];
+    renderMonthPills(months);
+    renderMonthlyAnalysis();
   }
 
   function toRoman(n) {
@@ -596,6 +652,169 @@
   function formatDate(iso) {
     const [y, m, d] = iso.split("-");
     return `${d}.${m}.${y}`;
+  }
+
+  // ---------------------------------------------------------------
+  // Monthly analysis — מגמת חשיפה מצטברת לאורך החודש. אותה שכבת נתונים
+  // בדיוק כמו הניתוח היומי (currentUser.sessions + scoreOf) — רק
+  // מקובצת לפי יום-בחודש ומצטברת, לא מוצגת מחדש. לא נוגעים בטבלה/
+  // בניתוח היומי הקיימים כלל.
+  // ---------------------------------------------------------------
+  function monthLabel(monthStr) {
+    const [y, m] = monthStr.split("-").map(Number);
+    return `${HEBREW_MONTHS[m - 1]} ${y}`;
+  }
+
+  function renderMonthPills(months) {
+    const wrap = document.getElementById("month-pills");
+    wrap.innerHTML = "";
+    months.forEach(m => {
+      const pill = document.createElement("button");
+      pill.className = "date-pill" + (m === currentMonth ? " active" : "");
+      pill.textContent = monthLabel(m);
+      pill.addEventListener("click", () => {
+        currentMonth = m;
+        renderMonthPills(months);
+        renderMonthlyAnalysis();
+      });
+      wrap.appendChild(pill);
+    });
+  }
+
+  function renderMonthlyAnalysis() {
+    document.getElementById("month-label").textContent = monthLabel(currentMonth);
+
+    const [y, m] = currentMonth.split("-").map(Number);
+    const daysInThisMonth = new Date(y, m, 0).getDate();
+    const todayStr = isoToLocalDateStr(new Date().toISOString());
+    const isCurrentMonth = todayStr.slice(0, 7) === currentMonth;
+    // בחודש הנוכחי עוצרים בהיום — אין להציג ציר-זמן עד סוף חודש שעוד
+    // לא קרה. בחודשים שעברו מציגים את כל הימים.
+    const lastDay = isCurrentMonth ? Number(todayStr.slice(8, 10)) : daysInThisMonth;
+
+    const monthSessions = currentUser.sessions.filter(s => s.date.slice(0, 7) === currentMonth);
+
+    // סכום מדד החשיפה לכל יום (יכולים להיות כמה sessions באותו יום)
+    const dailyScore = {};
+    monthSessions.forEach(s => {
+      const day = Number(s.date.slice(8, 10));
+      dailyScore[day] = (dailyScore[day] || 0) + scoreOf(s);
+    });
+
+    // סדרה מצטברת: יום-אחר-יום, כל יום מוסיף את התרומה שלו לסכום הרץ
+    const points = [];
+    let running = 0;
+    for (let day = 1; day <= lastDay; day++) {
+      const hasData = Object.prototype.hasOwnProperty.call(dailyScore, day);
+      if (hasData) running += dailyScore[day];
+      points.push({ day, cumulative: running, dayScore: dailyScore[day] || 0, hasData });
+    }
+
+    // --- Stat tiles ---
+    const totalMinutes = monthSessions.reduce((sum, s) => sum + durationMinutes(s.start, s.end), 0);
+    const activeDays = Object.keys(dailyScore).length;
+    const statGrid = document.getElementById("month-stat-grid");
+    statGrid.innerHTML = `
+      <div class="stat-tile">
+        <div class="label">Sessions החודש</div>
+        <div class="value">${monthSessions.length}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="label">זמן כולל בשמש</div>
+        <div class="value">${Math.floor(totalMinutes / 60)} שע' ${totalMinutes % 60} דק'</div>
+      </div>
+      <div class="stat-tile">
+        <div class="label">ימי חשיפה</div>
+        <div class="value">${activeDays} מתוך ${lastDay}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="label">חשיפה מצטברת</div>
+        <div class="value">${running}%</div>
+      </div>
+    `;
+
+    renderMonthChart(points);
+
+    // --- Feedback ---
+    const feedbackEl = document.getElementById("month-feedback-text");
+    if (monthSessions.length === 0) {
+      feedbackEl.textContent = "אין עדיין נתונים לחודש הזה.";
+    } else {
+      const avgDailyScore = activeDays > 0 ? running / activeDays : 0;
+      const status = scoreToStatus(Math.round(avgDailyScore));
+      feedbackEl.textContent =
+        `${activeDays} מתוך ${lastDay} הימים החודש כללו חשיפה לשמש, ברמת חשיפה יומית ` +
+        `ממוצעת של ${STATUS[status].label} (${Math.round(avgDailyScore)}%). ` +
+        `סך כל החשיפה המצטברת החודש: ${running}%.`;
+    }
+  }
+
+  function renderMonthChart(points) {
+    const svg = document.getElementById("month-chart-svg");
+    const tooltip = document.getElementById("month-tooltip");
+    const wrap = svg.parentElement;
+
+    const W = 600, H = 200;
+    const padL = 34, padR = 8, padT = 14, padB = 22;
+    const chartW = W - padL - padR;
+    const chartH = H - padT - padB;
+    const lastDay = points.length;
+    const maxCumulative = lastDay ? points[lastDay - 1].cumulative : 0;
+    const maxY = Math.max(100, maxCumulative * 1.15);
+
+    const xFor = (day) => padL + (lastDay > 1 ? (day - 1) / (lastDay - 1) : 0) * chartW;
+    const yFor = (val) => padT + chartH - (val / maxY) * chartH;
+
+    // --- gridlines + y labels: 0%, 1/3, 2/3, מקסימום ---
+    let gridSvg = "";
+    [0, maxY / 3, (maxY * 2) / 3, maxY].forEach((v) => {
+      const yPos = yFor(v);
+      gridSvg += `<line class="month-gridline" x1="${padL}" y1="${yPos}" x2="${W - padR}" y2="${yPos}"></line>`;
+      gridSvg += `<text class="month-axis-label" x="${padL - 6}" y="${yPos + 3}" text-anchor="end">${Math.round(v)}%</text>`;
+    });
+
+    // --- line + area — כיוון שמאל-לימין תמיד (מוסכמת גרפי-מגמה סטנדרטית,
+    // כמו .hbar-track שכבר נכפה ל-ltr באנליזה היומית) בלי קשר ל-RTL של הדף ---
+    const linePoints = points.map(p => `${xFor(p.day)},${yFor(p.cumulative)}`).join(" L ");
+    const linePath = lastDay ? `M ${linePoints}` : "";
+    const areaPath = lastDay
+      ? `M ${xFor(1)},${yFor(0)} L ${linePoints} L ${xFor(lastDay)},${yFor(0)} Z`
+      : "";
+
+    // --- x-axis: מספרי ימים, עד כ-7 תוויות כדי לא לצפוף ---
+    const labelEvery = Math.max(1, Math.ceil(lastDay / 7));
+    let xLabelsSvg = "";
+    points.forEach((p) => {
+      if (p.day === 1 || p.day === lastDay || p.day % labelEvery === 0) {
+        xLabelsSvg += `<text class="month-axis-label" x="${xFor(p.day)}" y="${H - 4}" text-anchor="middle">${p.day}</text>`;
+      }
+    });
+
+    // --- נקודות: רק בימים עם session אמיתי בפועל (לא בכל יום בחודש) ---
+    let dotsSvg = "";
+    points.filter(p => p.hasData).forEach((p) => {
+      dotsSvg += `<circle class="month-dot" data-day="${p.day}" data-cumulative="${p.cumulative}" data-dayscore="${p.dayScore}" cx="${xFor(p.day)}" cy="${yFor(p.cumulative)}" r="4"></circle>`;
+    });
+
+    svg.innerHTML = gridSvg
+      + (areaPath ? `<path class="month-area" d="${areaPath}"></path>` : "")
+      + (linePath ? `<path class="month-line" d="${linePath}"></path>` : "")
+      + xLabelsSvg + dotsSvg;
+
+    svg.querySelectorAll(".month-dot").forEach((dot) => {
+      dot.addEventListener("mouseenter", () => {
+        const day = dot.getAttribute("data-day");
+        const cumulative = dot.getAttribute("data-cumulative");
+        const dayScore = dot.getAttribute("data-dayscore");
+        tooltip.textContent = `יום ${day}: ‎+${dayScore}% היום · מצטבר ${cumulative}%`;
+        const dotRect = dot.getBoundingClientRect();
+        const wrapRect = wrap.getBoundingClientRect();
+        tooltip.style.left = `${dotRect.left - wrapRect.left + dotRect.width / 2}px`;
+        tooltip.style.top = `${dotRect.top - wrapRect.top}px`;
+        tooltip.classList.add("visible");
+      });
+      dot.addEventListener("mouseleave", () => tooltip.classList.remove("visible"));
+    });
   }
 
   function renderSessionsTable() {

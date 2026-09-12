@@ -1,17 +1,16 @@
 """
-SunSafe — Agent Loop against the MCP Weather Server
--------------------------------------------------------
-An updated version of agent_loop.py: instead of tools hand-defined in Python
-(the TOOLS dict), the tools are discovered dynamically from an MCP server
-(mcp_weather_server.py) — the Agent Loop "does not know" how the weather API is
-built, it only talks to MCP. This makes it possible to swap providers
-(Open-Meteo -> something else) without touching the agent logic, and to use the
-same server from Claude Desktop for manual testing.
+SunSafe — Agent Loop מול MCP Weather Server
+-----------------------------------------------
+גרסה מעודכנת של agent_loop.py: במקום כלים מוגדרים ידנית ב-Python
+(TOOLS dict), הכלים מגיעים דינמית משרת MCP (mcp_weather_server.py) —
+ה-Agent Loop "לא יודע" איך בנוי ה-Weather API, הוא רק מדבר עם MCP.
+זה מאפשר להחליף ספק (Open-Meteo -> משהו אחר) בלי לגעת בלוגיקת הסוכן,
+ולהשתמש באותו שרת גם מ-Claude Desktop לבדיקות ידניות.
 
-Install:
+התקנה:
     pip install mcp google-genai python-dotenv httpx
 
-Run as a standalone check:
+הרצה כבדיקה עצמאית:
     python mcp_agent_loop.py
 """
 
@@ -41,15 +40,26 @@ logging.basicConfig(level=logging.INFO)
 # שגורם לתת-התהליך לקרוס מיד עם ImportError — וללקוח זה נראה כמו
 # "Connection closed" סתום בלי שום רמז לסיבה האמיתית.
 _SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# env=os.environ.copy() — קריטי, לא קוסמטי: ה-SDK של MCP, כשלא מציינים
+# env במפורש, *לא* מעביר לתת-התהליך את משתני הסביבה של התהליך האב —
+# הוא מעביר רק רשימה בטוחה מצומצמת (HOME/PATH/USER/וכו', ראו
+# mcp.client.stdio.get_default_environment). גילינו את זה כשראינו
+# בפרודקשן ש-log_uv_reading נכשל תמיד עם "SUPABASE_URL ו/או
+# SUPABASE_SERVICE_ROLE_KEY לא מוגדרים" — הסודות *כן* מוגדרים ב-Space
+# (BOT_TOKEN/GEMINI_API_KEY עובדים מצוין), הם פשוט אף פעם לא הגיעו
+# לתת-התהליך של mcp_weather_server.py. בלי זה, כל קריאת UV שעוברת דרך
+# ה-Agent Loop (הודעות חופשיות) לא נרשמת בטבלת uv_readings.
 DEFAULT_SERVER_PARAMS = StdioServerParameters(
     command=sys.executable,
     args=[os.path.join(_SERVER_DIR, "mcp_weather_server.py")],
     cwd=_SERVER_DIR,
+    env=os.environ.copy(),
 )
 
 
 def make_client() -> genai.Client:
-    """Gemini Developer API — the course's default track (API key, no GCP)."""
+    """Gemini Developer API — מסלול הברירת מחדל של הקורס (API Key, ללא GCP)."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -61,9 +71,9 @@ def make_client() -> genai.Client:
 
 def _normalize_schema_types(schema: dict) -> dict:
     """
-    MCP returns a JSON Schema with lowercase types ("object", "string"), while
-    the Gemini SDK expects uppercase ones ("OBJECT", "STRING"). This function
-    converts recursively between the two formats.
+    MCP מחזיר JSON Schema עם types באותיות קטנות ("object", "string"),
+    בעוד שה-SDK של Gemini מצפה לאותיות גדולות ("OBJECT", "STRING").
+    הפונקציה הזו ממירה רקורסיבית בין הפורמטים.
     """
     if not isinstance(schema, dict):
         return schema
@@ -81,7 +91,7 @@ def _normalize_schema_types(schema: dict) -> dict:
 
 
 def mcp_tools_to_function_declarations(mcp_tools) -> list[types.FunctionDeclaration]:
-    """Convert a list of tools from session.list_tools() into Gemini FunctionDeclarations."""
+    """ממיר רשימת Tools שהתקבלה מ-session.list_tools() ל-FunctionDeclaration של Gemini."""
     declarations = []
     for tool in mcp_tools:
         schema = _normalize_schema_types(
@@ -98,7 +108,7 @@ def mcp_tools_to_function_declarations(mcp_tools) -> list[types.FunctionDeclarat
 
 
 def _parse_tool_result(result) -> object:
-    """Extract a readable result from a CallToolResult (usually TextContent holding JSON)."""
+    """מחלץ תוצאה קריאה מתוך CallToolResult (לרוב TextContent עם JSON בפנים)."""
     texts = [c.text for c in result.content if hasattr(c, "text")]
     joined = "\n".join(texts)
     try:
@@ -161,7 +171,7 @@ async def agent_loop_mcp(
 
 
 def run(task: str, server_params: StdioServerParameters = DEFAULT_SERVER_PARAMS) -> str:
-    """A convenient synchronous wrapper for calling from regular code (e.g. send_uv_report.py)."""
+    """עטיפה סינכרונית נוחה לקריאה מקוד רגיל (למשל send_uv_report.py)."""
     return asyncio.run(agent_loop_mcp(task, server_params))
 
 
