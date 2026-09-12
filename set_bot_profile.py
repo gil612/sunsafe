@@ -52,20 +52,22 @@ DESCRIPTION = (
     "• /start_session <עיר> — מתחיל מעקב, כולל תחזית UV ל-24 השעות הקרובות\n"
     "• /end_session — מסיים ומחשב מדד חשיפה אישי (לפי סוג העור וקרם הגנה)\n"
     "• /my_sessions — היסטוריית ה-sessions שלכם\n"
-    "• /dashboard — אזור אישי עם גרפים"
+    "• /dashboard — אזור אישי עם גרפים, וגם הוספה/עריכה/מחיקה של sessions"
 )
 
 # סדר = סדר ההופעה בתפריט "/" בטלגרם. שם פקודה חייב: אותיות קטנות/
 # ספרות/קו תחתון בלבד, 1-32 תווים (מגבלת Bot API) — תואם ל-COMMAND_HANDLERS
 # הקיים ב-bot_commands.py.
+#
+# 2026-09-12: add_session / edit_session / delete_session ירדו מהתפריט —
+# ההוספה, העריכה והמחיקה עברו לדשבורד (/dashboard). הפקודות עצמן עדיין
+# מוכרות לבוט ומחזירות קישור לאזור האישי (handle_moved_to_dashboard
+# ב-bot_commands.py), אבל אין סיבה להציע אותן בתפריט.
 COMMANDS = [
     ("start", "ברוכים הבאים + הסבר קצר איך מתחילים"),
     ("start_session", "התחלת session חדש למעקב חשיפה לשמש"),
     ("end_session", "סיום ה-session הפתוח וחישוב מדד חשיפה"),
-    ("add_session", "הוספת session ישן שכבר הסתיים"),
     ("my_sessions", "רשימת ה-sessions האחרונים שלכם"),
-    ("edit_session", "עריכת session קיים (שעת סיום / SPF)"),
-    ("delete_session", "מחיקת session"),
     ("offline_session", "תיעוד session בלי אינטרנט"),
     ("set_skin_type", "הגדרת סוג עור (1-6, סולם Fitzpatrick)"),
     ("diagnose_skin", "הערכת נזק-שמש מתמונה (לא ייעוץ רפואי)"),

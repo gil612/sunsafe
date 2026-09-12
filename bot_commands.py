@@ -1793,9 +1793,10 @@ def handle_my_sessions(chat_id: int, username: str) -> None:
         lines.append(f"#{s['id']} · {s['city']} · {status}{extra_str}")
 
     lines.append("")
-    lines.append("למחיקה: /delete_session <מספר>")
-    lines.append("לעריכה: /edit_session <מספר> end=now|HH:MM ו/או spf=<מספר>")
-    lines.append("להוספת session ישן: /add_session <עיר> start=HH:MM end=HH:MM [spf=..]")
+    # ההוספה/עריכה/מחיקה עברו לדשבורד ב-2026-09-12 (ראו
+    # handle_moved_to_dashboard למטה) — הרשימה כאן נשארת לצפייה מהירה
+    # בטלגרם, אבל כל שינוי בפועל נעשה באזור האישי.
+    lines.append("להוספה, עריכה או מחיקה: /dashboard")
     send_message(chat_id, "\n".join(lines))
 
 
@@ -1998,8 +1999,41 @@ def handle_edit_session(chat_id: int, username: str, args: str) -> None:
 
 
 # ---------------------------------------------------------------------
+# /add_session, /edit_session, /delete_session — הועברו לדשבורד
+# ---------------------------------------------------------------------
+def handle_moved_to_dashboard(chat_id: int, username: str, args: str) -> None:
+    """
+    2026-09-12: הוספה, עריכה ומחיקה של sessions עברו מהבוט לאזור האישי
+    (docs/dashboard/index.html + Edge Function dashboard-sessions). טופס
+    עם שדות מובנים עדיף כאן על תחביר טקסטואלי שצריך לזכור
+    ("/add_session <עיר> start=HH:MM end=HH:MM spf=.."), במיוחד לעריכה
+    שדרשה גם לדעת את מספר ה-session מראש.
+
+    הפקודות עצמן נשארות רשומות ב-COMMAND_HANDLERS *בכוונה*, ממופות
+    לפונקציה הזו: מי שרגיל אליהן מקבל הסבר וקישור ישיר במקום שתיקה או
+    תשובה כללית מה-Agent Loop (כל טקסט שלא תואם פקודה מוכרת מגיע לשם).
+    """
+    link = create_magic_link(username)
+    send_message(
+        chat_id,
+        "הוספה, עריכה ומחיקה של sessions עברו לאזור האישי — שם יש טופס "
+        "מסודר במקום לזכור תחביר של פקודה.\n\n"
+        f"{link}\n\n"
+        "(הקישור בתוקף ל-24 שעות. למדידה בזמן אמת אפשר להמשיך להשתמש "
+        "ב-/start_session ו-/end_session כרגיל.)",
+    )
+    logger.info("Redirected @%s from a moved session command to the dashboard", username)
+
+
+# ---------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------
+# הערה על handle_add_session/handle_edit_session/handle_delete_session
+# למעלה: הן כבר לא מחוברות לשום פקודה (ראו handle_moved_to_dashboard),
+# אבל הקוד שלהן — והבדיקות test_add_session_manual.py/test_edit_session.py
+# שמכסות אותו — נשמרו בכוונה בשלב הזה, כדי שהמעבר לדשבורד יהיה הפיך
+# בלי לשחזר לוגיקה מההיסטוריה. אפשר למחוק אותן בניקיון נפרד אחרי
+# שהזרימה החדשה תרוץ בפרודקשן ותוכיח את עצמה.
 COMMAND_HANDLERS = {
     "/start": handle_start,
     "/dashboard": lambda chat_id, username, args: handle_dashboard(chat_id, username),
@@ -2009,9 +2043,9 @@ COMMAND_HANDLERS = {
     "/offline_session": handle_offline_session,
     "/my_sessions": lambda chat_id, username, args: handle_my_sessions(chat_id, username),
     "/today": handle_today,
-    "/delete_session": handle_delete_session,
-    "/edit_session": handle_edit_session,
-    "/add_session": handle_add_session,
+    "/delete_session": handle_moved_to_dashboard,
+    "/edit_session": handle_moved_to_dashboard,
+    "/add_session": handle_moved_to_dashboard,
     "/diagnose_skin": handle_diagnose_skin,
 }
 
